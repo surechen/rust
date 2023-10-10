@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hasher;
-use std::num::NonZeroUsize;
+use std::num::{IntErrorKind, NonZeroUsize};
 use std::path::PathBuf;
 use std::str;
 
@@ -387,7 +387,7 @@ mod desc {
         "`all` (default), `except-unused-generics`, `except-unused-functions`, or `off`";
     pub const parse_instrument_xray: &str = "either a boolean (`yes`, `no`, `on`, `off`, etc), or a comma separated list of settings: `always` or `never` (mutually exclusive), `ignore-loops`, `instruction-threshold=N`, `skip-entry`, `skip-exit`";
     pub const parse_unpretty: &str = "`string` or `string=string`";
-    pub const parse_treat_err_as_bug: &str = "either no value or a number bigger than 0";
+    pub const parse_treat_err_as_bug: &str = "either no value or a non-negative number";
     pub const parse_trait_solver: &str =
         "one of the supported solver modes (`classic`, `next`, or `next-coherence`)";
     pub const parse_lto: &str =
@@ -412,7 +412,6 @@ mod desc {
         "one of supported split-debuginfo modes (`off`, `packed`, or `unpacked`)";
     pub const parse_split_dwarf_kind: &str =
         "one of supported split dwarf modes (`split` or `single`)";
-    pub const parse_gcc_ld: &str = "one of: no value, `lld`";
     pub const parse_link_self_contained: &str = "one of: `y`, `yes`, `on`, `n`, `no`, `off`, or a list of enabled (`+` prefix) and disabled (`-` prefix) \
         components: `crto`, `libc`, `unwind`, `linker`, `sanitizers`, `mingw`";
     pub const parse_stack_protector: &str =
@@ -986,10 +985,16 @@ mod parse {
 
     pub(crate) fn parse_treat_err_as_bug(slot: &mut Option<NonZeroUsize>, v: Option<&str>) -> bool {
         match v {
-            Some(s) => {
-                *slot = s.parse().ok();
-                slot.is_some()
-            }
+            Some(s) => match s.parse() {
+                Ok(val) => {
+                    *slot = Some(val);
+                    true
+                }
+                Err(e) => {
+                    *slot = None;
+                    e.kind() == &IntErrorKind::Zero
+                }
+            },
             None => {
                 *slot = NonZeroUsize::new(1);
                 true
@@ -1191,15 +1196,6 @@ mod parse {
     pub(crate) fn parse_split_dwarf_kind(slot: &mut SplitDwarfKind, v: Option<&str>) -> bool {
         match v.and_then(|s| SplitDwarfKind::from_str(s).ok()) {
             Some(e) => *slot = e,
-            _ => return false,
-        }
-        true
-    }
-
-    pub(crate) fn parse_gcc_ld(slot: &mut Option<LdImpl>, v: Option<&str>) -> bool {
-        match v {
-            None => *slot = None,
-            Some("lld") => *slot = Some(LdImpl::Lld),
             _ => return false,
         }
         true
@@ -1452,17 +1448,11 @@ options! {
     dont_buffer_diagnostics: bool = (false, parse_bool, [UNTRACKED],
         "emit diagnostics rather than buffering (breaks NLL error downgrading, sorting) \
         (default: no)"),
-    drop_tracking: bool = (false, parse_bool, [TRACKED],
-        "enables drop tracking in generators (default: no)"),
-    drop_tracking_mir: bool = (false, parse_bool, [TRACKED],
-        "enables drop tracking on MIR in generators (default: no)"),
     dual_proc_macros: bool = (false, parse_bool, [TRACKED],
         "load proc macros for both target and host, but only link to the target (default: no)"),
     dump_dep_graph: bool = (false, parse_bool, [UNTRACKED],
         "dump the dependency graph to $RUST_DEP_GRAPH (default: /tmp/dep_graph.gv) \
         (default: no)"),
-    dump_drop_tracking_cfg: Option<String> = (None, parse_opt_string, [UNTRACKED],
-        "dump drop-tracking control-flow graph as a `.dot` file (default: no)"),
     dump_mir: Option<String> = (None, parse_opt_string, [UNTRACKED],
         "dump MIR state to file.
         `val` is used to select which passes and functions to dump. For example:
@@ -1521,7 +1511,6 @@ options! {
         "whether each function should go in its own section"),
     future_incompat_test: bool = (false, parse_bool, [UNTRACKED],
         "forces all lints to be future incompatible, used for internal testing (default: no)"),
-    gcc_ld: Option<LdImpl> = (None, parse_gcc_ld, [TRACKED], "implementation of ld used by cc"),
     graphviz_dark_mode: bool = (false, parse_bool, [UNTRACKED],
         "use dark-themed colors in graphviz output (default: no)"),
     graphviz_font: String = ("Courier, monospace".to_string(), parse_string, [UNTRACKED],
@@ -1846,7 +1835,8 @@ written to standard error output)"),
     trap_unreachable: Option<bool> = (None, parse_opt_bool, [TRACKED],
         "generate trap instructions for unreachable intrinsics (default: use target setting, usually yes)"),
     treat_err_as_bug: Option<NonZeroUsize> = (None, parse_treat_err_as_bug, [TRACKED],
-        "treat error number `val` that occurs as bug"),
+        "treat the `val`th error that occurs as bug (default if not specified: 0 - don't treat errors as bugs. \
+        default if specified without a value: 1 - treat the first error as bug)"),
     trim_diagnostic_paths: bool = (true, parse_bool, [UNTRACKED],
         "in diagnostics, use heuristics to shorten paths referring to items"),
     tune_cpu: Option<String> = (None, parse_opt_string, [TRACKED],
@@ -1904,9 +1894,4 @@ written to standard error output)"),
 pub enum WasiExecModel {
     Command,
     Reactor,
-}
-
-#[derive(Clone, Copy, Hash)]
-pub enum LdImpl {
-    Lld,
 }

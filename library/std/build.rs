@@ -1,5 +1,11 @@
 use std::env;
 
+// backtrace-rs requires a feature check on Android targets, so
+// we need to run its build.rs as well.
+#[allow(unused_extern_crates)]
+#[path = "../backtrace/build.rs"]
+mod backtrace_build_rs;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     let target = env::var("TARGET").expect("TARGET was not set");
@@ -36,8 +42,11 @@ fn main() {
         || target.contains("solid")
         || target.contains("nintendo-3ds")
         || target.contains("vita")
+        || target.contains("aix")
         || target.contains("nto")
         || target.contains("xous")
+        || target.contains("hurd")
+        || target.contains("uefi")
         // See src/bootstrap/synthetic_targets.rs
         || env::var("RUSTC_BOOTSTRAP_SYNTHETIC_TARGET").is_ok()
     {
@@ -50,11 +59,12 @@ fn main() {
         // - mipsel-sony-psp
         // - nvptx64-nvidia-cuda
         // - arch=avr
-        // - uefi (x86_64-unknown-uefi, i686-unknown-uefi)
         // - JSON targets
         // - Any new targets that have not been explicitly added above.
         println!("cargo:rustc-cfg=feature=\"restricted-std\"");
     }
     println!("cargo:rustc-env=STD_ENV_ARCH={}", env::var("CARGO_CFG_TARGET_ARCH").unwrap());
     println!("cargo:rustc-cfg=backtrace_in_libstd");
+
+    backtrace_build_rs::main();
 }

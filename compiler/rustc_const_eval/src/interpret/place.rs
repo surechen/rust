@@ -460,7 +460,7 @@ where
         trace!("deref to {} on {:?}", val.layout.ty, *val);
 
         if val.layout.ty.is_box() {
-            bug!("dereferencing {:?}", val.layout.ty);
+            bug!("dereferencing {}", val.layout.ty);
         }
 
         let mplace = self.ref_to_mplace(&val)?;
@@ -573,19 +573,24 @@ where
 
         trace!("{:?}", self.dump_place(&place));
         // Sanity-check the type we ended up with.
-        debug_assert!(
-            mir_assign_valid_types(
+        if cfg!(debug_assertions) {
+            let normalized_place_ty = self.subst_from_current_frame_and_normalize_erasing_regions(
+                mir_place.ty(&self.frame().body.local_decls, *self.tcx).ty,
+            )?;
+            if !mir_assign_valid_types(
                 *self.tcx,
                 self.param_env,
-                self.layout_of(self.subst_from_current_frame_and_normalize_erasing_regions(
-                    mir_place.ty(&self.frame().body.local_decls, *self.tcx).ty
-                )?)?,
+                self.layout_of(normalized_place_ty)?,
                 place.layout,
-            ),
-            "eval_place of a MIR place with type {:?} produced an interpreter place with type {:?}",
-            mir_place.ty(&self.frame().body.local_decls, *self.tcx).ty,
-            place.layout.ty,
-        );
+            ) {
+                span_bug!(
+                    self.cur_span(),
+                    "eval_place of a MIR place with type {} produced an interpreter place with type {}",
+                    normalized_place_ty,
+                    place.layout.ty,
+                )
+            }
+        }
         Ok(place)
     }
 
@@ -835,7 +840,7 @@ where
         if !allow_transmute && !layout_compat {
             span_bug!(
                 self.cur_span(),
-                "type mismatch when copying!\nsrc: {:?},\ndest: {:?}",
+                "type mismatch when copying!\nsrc: {},\ndest: {}",
                 src.layout().ty,
                 dest.layout().ty,
             );

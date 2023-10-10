@@ -94,12 +94,12 @@ pub(super) fn generics_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::Generics {
                     //                             ^ param_id
                     //    ^^^ parent_id after twice iterations
                     //        ^ generics of parent
-                    // Push GenericParamDef of 'N' in above example into params.
+                    // Push GenericParamDef 'N' into params.
                     if let hir::Node::GenericParam(
                         GenericParam{
-                            hir_id: parent_hir_id,
+                            hir_id: _hir_id,
                             kind: GenericParamKind::Const {
-                                ty: ty_info,
+                                ty: _ty,
                                 default: Some(anon_const) },
                             name,
                             def_id,
@@ -127,6 +127,7 @@ pub(super) fn generics_of(tcx: TyCtxt<'_>, def_id: LocalDefId) -> ty::Generics {
                             host_effect_index: None,
                         };
                     }
+
                     let param_def_idx = generics.param_def_id_to_index[&param_id.to_def_id()];
                     // In the above example this would be .params[..N#0]
                     let params = generics.params_to(param_def_idx as usize, tcx).to_owned();

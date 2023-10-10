@@ -16,7 +16,7 @@ use rustc_middle::mir::interpret::{
     Pointer, Provenance,
 };
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::*;
+use rustc_middle::mir::{self, *};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_target::abi::Size;
 
@@ -685,13 +685,27 @@ impl Debug for Statement<'_> {
             AscribeUserType(box (ref place, ref c_ty), ref variance) => {
                 write!(fmt, "AscribeUserType({place:?}, {variance:?}, {c_ty:?})")
             }
-            Coverage(box self::Coverage { ref kind, code_region: Some(ref rgn) }) => {
-                write!(fmt, "Coverage::{kind:?} for {rgn:?}")
+            Coverage(box mir::Coverage { ref kind, ref code_regions }) => {
+                if code_regions.is_empty() {
+                    write!(fmt, "Coverage::{kind:?}")
+                } else {
+                    write!(fmt, "Coverage::{kind:?} for {code_regions:?}")
+                }
             }
-            Coverage(box ref coverage) => write!(fmt, "Coverage::{:?}", coverage.kind),
             Intrinsic(box ref intrinsic) => write!(fmt, "{intrinsic}"),
             ConstEvalCounter => write!(fmt, "ConstEvalCounter"),
             Nop => write!(fmt, "nop"),
+        }
+    }
+}
+
+impl Display for NonDivergingIntrinsic<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Assume(op) => write!(f, "assume({op:?})"),
+            Self::CopyNonOverlapping(CopyNonOverlapping { src, dst, count }) => {
+                write!(f, "copy_nonoverlapping(dst = {dst:?}, src = {src:?}, count = {count:?})")
+            }
         }
     }
 }
@@ -990,11 +1004,11 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     AggregateKind::Closure(def_id, args) => ty::tls::with(|tcx| {
                         let name = if tcx.sess.opts.unstable_opts.span_free_formats {
                             let args = tcx.lift(args).unwrap();
-                            format!("[closure@{}]", tcx.def_path_str_with_args(def_id, args),)
+                            format!("{{closure@{}}}", tcx.def_path_str_with_args(def_id, args),)
                         } else {
                             let span = tcx.def_span(def_id);
                             format!(
-                                "[closure@{}]",
+                                "{{closure@{}}}",
                                 tcx.sess.source_map().span_to_diagnostic_string(span)
                             )
                         };
@@ -1018,7 +1032,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                     }),
 
                     AggregateKind::Generator(def_id, _, _) => ty::tls::with(|tcx| {
-                        let name = format!("[generator@{:?}]", tcx.def_span(def_id));
+                        let name = format!("{{generator@{:?}}}", tcx.def_span(def_id));
                         let mut struct_fmt = fmt.debug_struct(&name);
 
                         // FIXME(project-rfc-2229#48): This should be a list of capture names/places
@@ -1058,6 +1072,22 @@ impl<'tcx> Debug for Operand<'tcx> {
     }
 }
 
+impl<'tcx> Debug for ConstOperand<'tcx> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        write!(fmt, "{self}")
+    }
+}
+
+impl<'tcx> Display for ConstOperand<'tcx> {
+    fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
+        match self.ty().kind() {
+            ty::FnDef(..) => {}
+            _ => write!(fmt, "const ")?,
+        }
+        Display::fmt(&self.const_, fmt)
+    }
+}
+
 impl Debug for Place<'_> {
     fn fmt(&self, fmt: &mut Formatter<'_>) -> fmt::Result {
         self.as_ref().fmt(fmt)
@@ -1076,6 +1106,7 @@ fn pre_fmt_projection(projection: &[PlaceElem<'_>], fmt: &mut Formatter<'_>) -> 
     for &elem in projection.iter().rev() {
         match elem {
             ProjectionElem::OpaqueCast(_)
+            | ProjectionElem::Subtype(_)
             | ProjectionElem::Downcast(_, _)
             | ProjectionElem::Field(_, _) => {
                 write!(fmt, "(").unwrap();
@@ -1098,6 +1129,9 @@ fn post_fmt_projection(projection: &[PlaceElem<'_>], fmt: &mut Formatter<'_>) ->
             ProjectionElem::OpaqueCast(ty) => {
                 write!(fmt, " as {ty})")?;
             }
+            ProjectionElem::Subtype(ty) => {
+                write!(fmt, " as subtype {ty})")?;
+            }
             ProjectionElem::Downcast(Some(name), _index) => {
                 write!(fmt, " as {name})")?;
             }
@@ -1119,10 +1153,10 @@ fn post_fmt_projection(projection: &[PlaceElem<'_>], fmt: &mut Formatter<'_>) ->
             ProjectionElem::ConstantIndex { offset, min_length, from_end: true } => {
                 write!(fmt, "[-{offset:?} of {min_length:?}]")?;
             }
-            ProjectionElem::Subslice { from, to, from_end: true } if to == 0 => {
+            ProjectionElem::Subslice { from, to: 0, from_end: true } => {
                 write!(fmt, "[{from:?}:]")?;
             }
-            ProjectionElem::Subslice { from, to, from_end: true } if from == 0 => {
+            ProjectionElem::Subslice { from: 0, to, from_end: true } => {
                 write!(fmt, "[:-{to:?}]")?;
             }
             ProjectionElem::Subslice { from, to, from_end: true } => {
@@ -1184,10 +1218,10 @@ fn use_verbose(ty: Ty<'_>, fn_def: bool) -> bool {
 }
 
 impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
-    fn visit_constant(&mut self, constant: &Constant<'tcx>, _location: Location) {
-        let Constant { span, user_ty, literal } = constant;
-        if use_verbose(literal.ty(), true) {
-            self.push("mir::Constant");
+    fn visit_constant(&mut self, constant: &ConstOperand<'tcx>, _location: Location) {
+        let ConstOperand { span, user_ty, const_ } = constant;
+        if use_verbose(const_.ty(), true) {
+            self.push("mir::ConstOperand");
             self.push(&format!(
                 "+ span: {}",
                 self.tcx.sess.source_map().span_to_embeddable_string(*span)
@@ -1209,8 +1243,8 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
                 ty::ValTree::Branch(_) => "Branch(..)".to_string(),
             };
 
-            let val = match literal {
-                ConstantKind::Ty(ct) => match ct.kind() {
+            let val = match const_ {
+                Const::Ty(ct) => match ct.kind() {
                     ty::ConstKind::Param(p) => format!("ty::Param({p})"),
                     ty::ConstKind::Unevaluated(uv) => {
                         format!("ty::Unevaluated({}, {:?})", self.tcx.def_path_str(uv.def), uv.args,)
@@ -1222,9 +1256,9 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
                     ty::ConstKind::Placeholder(_)
                     | ty::ConstKind::Infer(_)
                     | ty::ConstKind::Expr(_)
-                    | ty::ConstKind::Bound(..) => bug!("unexpected MIR constant: {:?}", literal),
+                    | ty::ConstKind::Bound(..) => bug!("unexpected MIR constant: {:?}", const_),
                 },
-                ConstantKind::Unevaluated(uv, _) => {
+                Const::Unevaluated(uv, _) => {
                     format!(
                         "Unevaluated({}, {:?}, {:?})",
                         self.tcx.def_path_str(uv.def),
@@ -1232,13 +1266,13 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
                         uv.promoted,
                     )
                 }
-                ConstantKind::Val(val, ty) => format!("Value({})", fmt_val(*val, *ty)),
+                Const::Val(val, ty) => format!("Value({})", fmt_val(*val, *ty)),
             };
 
             // This reflects what `Const` looked liked before `val` was renamed
             // as `kind`. We print it like this to avoid having to update
             // expected output in a lot of tests.
-            self.push(&format!("+ literal: Const {{ ty: {}, val: {} }}", literal.ty(), val));
+            self.push(&format!("+ const_: Const {{ ty: {}, val: {} }}", const_.ty(), val));
         }
     }
 
@@ -1312,10 +1346,10 @@ pub fn write_allocations<'tcx>(
     struct CollectAllocIds(BTreeSet<AllocId>);
 
     impl<'tcx> Visitor<'tcx> for CollectAllocIds {
-        fn visit_constant(&mut self, c: &Constant<'tcx>, _: Location) {
-            match c.literal {
-                ConstantKind::Ty(_) | ConstantKind::Unevaluated(..) => {}
-                ConstantKind::Val(val, _) => {
+        fn visit_constant(&mut self, c: &ConstOperand<'tcx>, _: Location) {
+            match c.const_ {
+                Const::Ty(_) | Const::Unevaluated(..) => {}
+                Const::Val(val, _) => {
                     self.0.extend(alloc_ids_from_const_val(val));
                 }
             }
@@ -1664,7 +1698,7 @@ fn pretty_print_const_value_tcx<'tcx>(
         (_, ty::Array(..) | ty::Tuple(..) | ty::Adt(..)) if !ty.has_non_region_param() => {
             let ct = tcx.lift(ct).unwrap();
             let ty = tcx.lift(ty).unwrap();
-            if let Some(contents) = tcx.try_destructure_mir_constant_for_diagnostics((ct, ty)) {
+            if let Some(contents) = tcx.try_destructure_mir_constant_for_diagnostics(ct, ty) {
                 let fields: Vec<(ConstValue<'_>, Ty<'_>)> = contents.fields.to_vec();
                 match *ty.kind() {
                     ty::Array(..) => {

@@ -71,6 +71,8 @@ mod freebsd_base;
 mod fuchsia_base;
 mod haiku_base;
 mod hermit_base;
+mod hurd_base;
+mod hurd_gnu_base;
 mod illumos_base;
 mod l4re_base;
 mod linux_base;
@@ -182,8 +184,6 @@ pub enum LinkerFlavorCli {
     Ld,
     Lld(LldFlavor),
     Em,
-    BpfLinker,
-    PtxLinker,
 }
 
 impl LinkerFlavorCli {
@@ -197,9 +197,7 @@ impl LinkerFlavorCli {
             | LinkerFlavorCli::Msvc(Lld::Yes)
             | LinkerFlavorCli::EmCc
             | LinkerFlavorCli::Bpf
-            | LinkerFlavorCli::Ptx
-            | LinkerFlavorCli::BpfLinker
-            | LinkerFlavorCli::PtxLinker => true,
+            | LinkerFlavorCli::Ptx => true,
             LinkerFlavorCli::Gcc
             | LinkerFlavorCli::Ld
             | LinkerFlavorCli::Lld(..)
@@ -277,8 +275,6 @@ impl LinkerFlavor {
             LinkerFlavorCli::Lld(LldFlavor::Wasm) => LinkerFlavor::WasmLld(Cc::No),
             LinkerFlavorCli::Lld(LldFlavor::Link) => LinkerFlavor::Msvc(Lld::Yes),
             LinkerFlavorCli::Em => LinkerFlavor::EmCc,
-            LinkerFlavorCli::BpfLinker => LinkerFlavor::Bpf,
-            LinkerFlavorCli::PtxLinker => LinkerFlavor::Ptx,
         }
     }
 
@@ -297,8 +293,8 @@ impl LinkerFlavor {
             LinkerFlavor::Msvc(Lld::Yes) => LinkerFlavorCli::Lld(LldFlavor::Link),
             LinkerFlavor::Msvc(..) => LinkerFlavorCli::Msvc(Lld::No),
             LinkerFlavor::EmCc => LinkerFlavorCli::Em,
-            LinkerFlavor::Bpf => LinkerFlavorCli::BpfLinker,
-            LinkerFlavor::Ptx => LinkerFlavorCli::PtxLinker,
+            LinkerFlavor::Bpf => LinkerFlavorCli::Bpf,
+            LinkerFlavor::Ptx => LinkerFlavorCli::Ptx,
         }
     }
 
@@ -318,7 +314,6 @@ impl LinkerFlavor {
             LinkerFlavorCli::Ld => (Some(Cc::No), Some(Lld::No)),
             LinkerFlavorCli::Lld(_) => (Some(Cc::No), Some(Lld::Yes)),
             LinkerFlavorCli::Em => (Some(Cc::Yes), Some(Lld::Yes)),
-            LinkerFlavorCli::BpfLinker | LinkerFlavorCli::PtxLinker => (None, None),
         }
     }
 
@@ -517,8 +512,6 @@ linker_flavor_cli_impls! {
     (LinkerFlavorCli::Lld(LldFlavor::Link)) "lld-link"
     (LinkerFlavorCli::Lld(LldFlavor::Wasm)) "wasm-ld"
     (LinkerFlavorCli::Em) "em"
-    (LinkerFlavorCli::BpfLinker) "bpf-linker"
-    (LinkerFlavorCli::PtxLinker) "ptx-linker"
 }
 
 impl ToJson for LinkerFlavorCli {
@@ -1367,6 +1360,8 @@ supported_targets! {
     ("i686-unknown-haiku", i686_unknown_haiku),
     ("x86_64-unknown-haiku", x86_64_unknown_haiku),
 
+    ("i686-unknown-hurd-gnu", i686_unknown_hurd_gnu),
+
     ("aarch64-apple-darwin", aarch64_apple_darwin),
     ("x86_64-apple-darwin", x86_64_apple_darwin),
     ("x86_64h-apple-darwin", x86_64h_apple_darwin),
@@ -1390,7 +1385,6 @@ supported_targets! {
     ("i386-apple-ios", i386_apple_ios),
     ("x86_64-apple-ios", x86_64_apple_ios),
     ("aarch64-apple-ios", aarch64_apple_ios),
-    ("armv7-apple-ios", armv7_apple_ios),
     ("armv7s-apple-ios", armv7s_apple_ios),
     ("x86_64-apple-ios-macabi", x86_64_apple_ios_macabi),
     ("aarch64-apple-ios-macabi", aarch64_apple_ios_macabi),

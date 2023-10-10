@@ -80,7 +80,6 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use if_chain::if_chain;
 use itertools::Itertools;
 use rustc_ast::ast::{self, LitKind, RangeLimits};
-use rustc_ast::Attribute;
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::unhash::UnhashMap;
 use rustc_hir::def::{DefKind, Res};
@@ -90,14 +89,14 @@ use rustc_hir::intravisit::{walk_expr, FnKind, Visitor};
 use rustc_hir::LangItem::{OptionNone, OptionSome, ResultErr, ResultOk};
 use rustc_hir::{
     self as hir, def, Arm, ArrayLen, BindingAnnotation, Block, BlockCheckMode, Body, Closure, Destination, Expr,
-    ExprField, ExprKind, FnDecl, FnRetTy, GenericArgs, HirId, Impl, ImplItem, ImplItemKind, ImplItemRef, IsAsync, Item,
+    ExprField, ExprKind, FnDecl, FnRetTy, GenericArgs, HirId, Impl, ImplItem, ImplItemKind, ImplItemRef, Item,
     ItemKind, LangItem, Local, MatchSource, Mutability, Node, OwnerId, Param, Pat, PatKind, Path, PathSegment, PrimTy,
     QPath, Stmt, StmtKind, TraitItem, TraitItemKind, TraitItemRef, TraitRef, TyKind, UnOp,
 };
 use rustc_lexer::{tokenize, TokenKind};
 use rustc_lint::{LateContext, Level, Lint, LintContext};
 use rustc_middle::hir::place::PlaceBase;
-use rustc_middle::mir::ConstantKind;
+use rustc_middle::mir::Const;
 use rustc_middle::ty::adjustment::{Adjust, Adjustment, AutoBorrow};
 use rustc_middle::ty::binding::BindingMode;
 use rustc_middle::ty::fast_reject::SimplifiedType;
@@ -113,7 +112,7 @@ use rustc_span::{sym, Span};
 use rustc_target::abi::Integer;
 use visitors::Visitable;
 
-use crate::consts::{constant, miri_to_const, Constant};
+use crate::consts::{constant, mir_to_const, Constant};
 use crate::higher::Range;
 use crate::ty::{
     adt_and_variant_of_res, can_partially_move_ty, expr_sig, is_copy, is_recursively_primitive_type,
@@ -288,7 +287,7 @@ pub fn is_wild(pat: &Pat<'_>) -> bool {
 /// Checks if the given `QPath` belongs to a type alias.
 pub fn is_ty_alias(qpath: &QPath<'_>) -> bool {
     match *qpath {
-        QPath::Resolved(_, path) => matches!(path.res, Res::Def(DefKind::TyAlias { .. } | DefKind::AssocTy, ..)),
+        QPath::Resolved(_, path) => matches!(path.res, Res::Def(DefKind::TyAlias | DefKind::AssocTy, ..)),
         QPath::TypeRelative(ty, _) if let TyKind::Path(qpath) = ty.kind => { is_ty_alias(&qpath) },
         _ => false,
     }
@@ -1509,9 +1508,7 @@ pub fn is_range_full(cx: &LateContext<'_>, expr: &Expr<'_>, container_path: Opti
             if let rustc_ty::Adt(_, subst) = ty.kind()
                 && let bnd_ty = subst.type_at(0)
                 && let Some(min_val) = bnd_ty.numeric_min_val(cx.tcx)
-                && let const_val = cx.tcx.valtree_to_const_val((bnd_ty, min_val.to_valtree()))
-                && let min_const_kind = ConstantKind::from_value(const_val, bnd_ty)
-                && let Some(min_const) = miri_to_const(cx, min_const_kind)
+                && let Some(min_const) = mir_to_const(cx, Const::from_ty_const(min_val, cx.tcx))
                 && let Some(start_const) = constant(cx, cx.typeck_results(), start)
             {
                 start_const == min_const
@@ -1525,9 +1522,7 @@ pub fn is_range_full(cx: &LateContext<'_>, expr: &Expr<'_>, container_path: Opti
                     if let rustc_ty::Adt(_, subst) = ty.kind()
                         && let bnd_ty = subst.type_at(0)
                         && let Some(max_val) = bnd_ty.numeric_max_val(cx.tcx)
-                        && let const_val = cx.tcx.valtree_to_const_val((bnd_ty, max_val.to_valtree()))
-                        && let max_const_kind = ConstantKind::from_value(const_val, bnd_ty)
-                        && let Some(max_const) = miri_to_const(cx, max_const_kind)
+                        && let Some(max_const) = mir_to_const(cx, Const::from_ty_const(max_val, cx.tcx))
                         && let Some(end_const) = constant(cx, cx.typeck_results(), end)
                     {
                         end_const == max_const
@@ -1785,6 +1780,33 @@ pub fn is_try<'tcx>(cx: &LateContext<'_>, expr: &'tcx Expr<'tcx>) -> Option<&'tc
     None
 }
 
+/// Returns `true` if the lint is `#[allow]`ed or `#[expect]`ed at any of the `ids`, fulfilling all
+/// of the expectations in `ids`
+///
+/// This should only be used when the lint would otherwise be emitted, for a way to check if a lint
+/// is allowed early to skip work see [`is_lint_allowed`]
+///
+/// To emit at a lint at a different context than the one current see
+/// [`span_lint_hir`](diagnostics::span_lint_hir) or
+/// [`span_lint_hir_and_then`](diagnostics::span_lint_hir_and_then)
+pub fn fulfill_or_allowed(cx: &LateContext<'_>, lint: &'static Lint, ids: impl IntoIterator<Item = HirId>) -> bool {
+    let mut suppress_lint = false;
+
+    for id in ids {
+        let (level, _) = cx.tcx.lint_level_at_node(lint, id);
+        if let Some(expectation) = level.get_expectation_id() {
+            cx.fulfill_expectation(expectation);
+        }
+
+        match level {
+            Level::Allow | Level::Expect(_) => suppress_lint = true,
+            Level::Warn | Level::ForceWarn(_) | Level::Deny | Level::Forbid => {},
+        }
+    }
+
+    suppress_lint
+}
+
 /// Returns `true` if the lint is allowed in the current context. This is useful for
 /// skipping long running code when it's unnecessary
 ///
@@ -1958,8 +1980,8 @@ pub fn if_sequence<'tcx>(mut expr: &'tcx Expr<'tcx>) -> (Vec<&'tcx Expr<'tcx>>, 
 /// Checks if the given function kind is an async function.
 pub fn is_async_fn(kind: FnKind<'_>) -> bool {
     match kind {
-        FnKind::ItemFn(_, _, header) => header.asyncness == IsAsync::Async,
-        FnKind::Method(_, sig) => sig.header.asyncness == IsAsync::Async,
+        FnKind::ItemFn(_, _, header) => header.asyncness.is_async(),
+        FnKind::Method(_, sig) => sig.header.asyncness.is_async(),
         FnKind::Closure => false,
     }
 }
@@ -2049,7 +2071,7 @@ pub fn is_expr_identity_function(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool 
 
     match expr.kind {
         ExprKind::Closure(&Closure { body, .. }) => is_body_identity_function(cx, cx.tcx.hir().body(body)),
-        _ => path_def_id(cx, expr).map_or(false, |id| match_def_path(cx, id, &paths::CONVERT_IDENTITY)),
+        _ => path_def_id(cx, expr).map_or(false, |id| cx.tcx.is_diagnostic_item(sym::convert_identity, id)),
     }
 }
 
@@ -2429,11 +2451,12 @@ pub fn is_in_test_function(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
     })
 }
 
-/// Checks if the item containing the given `HirId` has `#[cfg(test)]` attribute applied
+/// Checks if `id` has a `#[cfg(test)]` attribute applied
 ///
-/// Note: Add `//@compile-flags: --test` to UI tests with a `#[cfg(test)]` function
-pub fn is_in_cfg_test(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
-    fn is_cfg_test(attr: &Attribute) -> bool {
+/// This only checks directly applied attributes, to see if a node is inside a `#[cfg(test)]` parent
+/// use [`is_in_cfg_test`]
+pub fn is_cfg_test(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
+    tcx.hir().attrs(id).iter().any(|attr| {
         if attr.has_name(sym::cfg)
             && let Some(items) = attr.meta_item_list()
             && let [item] = &*items
@@ -2443,11 +2466,14 @@ pub fn is_in_cfg_test(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
         } else {
             false
         }
-    }
+    })
+}
+
+/// Checks if any parent node of `HirId` has `#[cfg(test)]` attribute applied
+pub fn is_in_cfg_test(tcx: TyCtxt<'_>, id: hir::HirId) -> bool {
     tcx.hir()
-        .parent_iter(id)
-        .flat_map(|(parent_id, _)| tcx.hir().attrs(parent_id))
-        .any(is_cfg_test)
+        .parent_id_iter(id)
+        .any(|parent_id| is_cfg_test(tcx, parent_id))
 }
 
 /// Checks if the item of any of its parents has `#[cfg(...)]` attribute applied.

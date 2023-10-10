@@ -142,9 +142,9 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
 
     fn visit_operand(&mut self, op: &Operand<'tcx>, location: Location) {
         if let Operand::Constant(constant) = op {
-            let maybe_uneval = match constant.literal {
-                ConstantKind::Val(..) | ConstantKind::Ty(_) => None,
-                ConstantKind::Unevaluated(uv, _) => Some(uv),
+            let maybe_uneval = match constant.const_ {
+                Const::Val(..) | Const::Ty(_) => None,
+                Const::Unevaluated(uv, _) => Some(uv),
             };
 
             if let Some(uv) = maybe_uneval {
@@ -179,7 +179,7 @@ impl<'tcx> Visitor<'tcx> for UnsafetyChecker<'_, 'tcx> {
         // Check the base local: it might be an unsafe-to-access static. We only check derefs of the
         // temporary holding the static pointer to avoid duplicate errors
         // <https://github.com/rust-lang/rust/pull/78068#issuecomment-731753506>.
-        if decl.internal && place.projection.first() == Some(&ProjectionElem::Deref) {
+        if place.projection.first() == Some(&ProjectionElem::Deref) {
             // If the projection root is an artificial local that we introduced when
             // desugaring `static`, give a more specific error message
             // (avoid the general "raw pointer" clause below, that would only be confusing).

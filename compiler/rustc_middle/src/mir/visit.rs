@@ -184,9 +184,11 @@ macro_rules! make_mir_visitor {
 
             visit_place_fns!($($mutability)?);
 
+            /// This is called for every constant in the MIR body and every `required_consts`
+            /// (i.e., including consts that have been dead-code-eliminated).
             fn visit_constant(
                 &mut self,
-                constant: & $($mutability)? Constant<'tcx>,
+                constant: & $($mutability)? ConstOperand<'tcx>,
                 location: Location,
             ) {
                 self.super_constant(constant, location);
@@ -815,7 +817,6 @@ macro_rules! make_mir_visitor {
                     ty,
                     user_ty,
                     source_info,
-                    internal: _,
                     local_info: _,
                 } = local_decl;
 
@@ -870,20 +871,20 @@ macro_rules! make_mir_visitor {
 
             fn super_constant(
                 &mut self,
-                constant: & $($mutability)? Constant<'tcx>,
+                constant: & $($mutability)? ConstOperand<'tcx>,
                 location: Location
             ) {
-                let Constant {
+                let ConstOperand {
                     span,
                     user_ty: _, // no visit method for this
-                    literal,
+                    const_,
                 } = constant;
 
                 self.visit_span($(& $mutability)? *span);
-                match literal {
-                    ConstantKind::Ty(ct) => self.visit_ty_const($(&$mutability)? *ct, location),
-                    ConstantKind::Val(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
-                    ConstantKind::Unevaluated(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
+                match const_ {
+                    Const::Ty(ct) => self.visit_ty_const($(&$mutability)? *ct, location),
+                    Const::Val(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
+                    Const::Unevaluated(_, ty) => self.visit_ty($(& $mutability)? *ty, TyContext::Location(location)),
                 }
             }
 
@@ -1109,6 +1110,11 @@ macro_rules! visit_place_fns {
                     self.visit_ty(&mut new_ty, TyContext::Location(location));
                     if ty != new_ty { Some(PlaceElem::OpaqueCast(new_ty)) } else { None }
                 }
+                PlaceElem::Subtype(ty) => {
+                    let mut new_ty = ty;
+                    self.visit_ty(&mut new_ty, TyContext::Location(location));
+                    if ty != new_ty { Some(PlaceElem::Subtype(new_ty)) } else { None }
+                }
                 PlaceElem::Deref
                 | PlaceElem::ConstantIndex { .. }
                 | PlaceElem::Subslice { .. }
@@ -1175,7 +1181,9 @@ macro_rules! visit_place_fns {
             location: Location,
         ) {
             match elem {
-                ProjectionElem::OpaqueCast(ty) | ProjectionElem::Field(_, ty) => {
+                ProjectionElem::OpaqueCast(ty)
+                | ProjectionElem::Subtype(ty)
+                | ProjectionElem::Field(_, ty) => {
                     self.visit_ty(ty, TyContext::Location(location));
                 }
                 ProjectionElem::Index(local) => {

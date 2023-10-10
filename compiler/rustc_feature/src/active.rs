@@ -7,15 +7,6 @@ use rustc_span::edition::Edition;
 use rustc_span::symbol::{sym, Symbol};
 use rustc_span::Span;
 
-macro_rules! set {
-    ($field: ident) => {{
-        fn f(features: &mut Features, _: Span) {
-            features.$field = true;
-        }
-        f as fn(&mut Features, Span)
-    }};
-}
-
 #[derive(PartialEq)]
 enum FeatureStatus {
     Default,
@@ -23,16 +14,19 @@ enum FeatureStatus {
     Internal,
 }
 
-macro_rules! declare_features {
-    (__status_to_enum active) => {
+macro_rules! status_to_enum {
+    (active) => {
         FeatureStatus::Default
     };
-    (__status_to_enum incomplete) => {
+    (incomplete) => {
         FeatureStatus::Incomplete
     };
-    (__status_to_enum internal) => {
+    (internal) => {
         FeatureStatus::Internal
     };
+}
+
+macro_rules! declare_features {
     ($(
         $(#[doc = $doc:tt])* ($status:ident, $feature:ident, $ver:expr, $issue:expr, $edition:expr),
     )+) => {
@@ -43,7 +37,10 @@ macro_rules! declare_features {
             &[$(
                 // (sym::$feature, $ver, $issue, $edition, set!($feature))
                 Feature {
-                    state: State::Active { set: set!($feature) },
+                    state: State::Active {
+                        // Sets this feature's corresponding bool within `features`.
+                        set: |features| features.$feature = true,
+                    },
                     name: sym::$feature,
                     since: $ver,
                     issue: to_nonzero($issue),
@@ -58,8 +55,9 @@ macro_rules! declare_features {
             pub declared_lang_features: Vec<(Symbol, Span, Option<Symbol>)>,
             /// `#![feature]` attrs for non-language (library) features.
             pub declared_lib_features: Vec<(Symbol, Span)>,
-            /// Features enabled for this crate.
-            pub active_features: FxHashSet<Symbol>,
+            /// `declared_lang_features` + `declared_lib_features`.
+            pub declared_features: FxHashSet<Symbol>,
+            /// Individual features (unstable only).
             $(
                 $(#[doc = $doc])*
                 pub $feature: bool
@@ -67,16 +65,33 @@ macro_rules! declare_features {
         }
 
         impl Features {
+            pub fn set_declared_lang_feature(
+                &mut self,
+                symbol: Symbol,
+                span: Span,
+                since: Option<Symbol>
+            ) {
+                self.declared_lang_features.push((symbol, span, since));
+                self.declared_features.insert(symbol);
+            }
+
+            pub fn set_declared_lib_feature(&mut self, symbol: Symbol, span: Span) {
+                self.declared_lib_features.push((symbol, span));
+                self.declared_features.insert(symbol);
+            }
+
             pub fn walk_feature_fields(&self, mut f: impl FnMut(&str, bool)) {
                 $(f(stringify!($feature), self.$feature);)+
             }
 
-            /// Is the given feature active?
-            pub fn active(&self, feature: Symbol) -> bool {
-                self.active_features.contains(&feature)
+            /// Is the given feature explicitly declared, i.e. named in a
+            /// `#![feature(...)]` within the code?
+            pub fn declared(&self, feature: Symbol) -> bool {
+                self.declared_features.contains(&feature)
             }
 
-            /// Is the given feature enabled?
+            /// Is the given feature enabled, i.e. declared or automatically
+            /// enabled due to the edition?
             ///
             /// Panics if the symbol doesn't correspond to a declared feature.
             pub fn enabled(&self, feature: Symbol) -> bool {
@@ -93,11 +108,10 @@ macro_rules! declare_features {
             pub fn incomplete(&self, feature: Symbol) -> bool {
                 match feature {
                     $(
-                        sym::$feature => declare_features!(__status_to_enum $status) == FeatureStatus::Incomplete,
+                        sym::$feature => status_to_enum!($status) == FeatureStatus::Incomplete,
                     )*
                     // accepted and removed features aren't in this file but are never incomplete
-                    _ if self.declared_lang_features.iter().any(|f| f.0 == feature) => false,
-                    _ if self.declared_lib_features.iter().any(|f| f.0 == feature) => false,
+                    _ if self.declared_features.contains(&feature) => false,
                     _ => panic!("`{}` was not listed in `declare_features`", feature),
                 }
             }
@@ -108,12 +122,11 @@ macro_rules! declare_features {
             pub fn internal(&self, feature: Symbol) -> bool {
                 match feature {
                     $(
-                        sym::$feature => declare_features!(__status_to_enum $status) == FeatureStatus::Internal,
+                        sym::$feature => status_to_enum!($status) == FeatureStatus::Internal,
                     )*
                     // accepted and removed features aren't in this file but are never internal
                     // (a removed feature might have been internal, but it doesn't matter anymore)
-                    _ if self.declared_lang_features.iter().any(|f| f.0 == feature) => false,
-                    _ if self.declared_lib_features.iter().any(|f| f.0 == feature) => false,
+                    _ if self.declared_features.contains(&feature) => false,
                     _ => panic!("`{}` was not listed in `declare_features`", feature),
                 }
             }
@@ -123,9 +136,9 @@ macro_rules! declare_features {
 
 impl Feature {
     /// Sets this feature in `Features`. Panics if called on a non-active feature.
-    pub fn set(&self, features: &mut Features, span: Span) {
+    pub fn set(&self, features: &mut Features) {
         match self.state {
-            State::Active { set } => set(features, span),
+            State::Active { set } => set(features),
             _ => panic!("called `set` on feature `{}` which is not `active`", self.name),
         }
     }
@@ -236,15 +249,15 @@ declare_features! (
     /// Allows using the `#[fundamental]` attribute.
     (active, fundamental, "1.0.0", Some(29635), None),
     /// Allows using `#[link_name="llvm.*"]`.
-    (active, link_llvm_intrinsics, "1.0.0", Some(29602), None),
+    (internal, link_llvm_intrinsics, "1.0.0", Some(29602), None),
     /// Allows using the `#[linkage = ".."]` attribute.
     (active, linkage, "1.0.0", Some(29603), None),
     /// Allows declaring with `#![needs_panic_runtime]` that a panic runtime is needed.
     (internal, needs_panic_runtime, "1.10.0", Some(32837), None),
-    /// Allows using `+bundled,+whole-archive` native libs.
-    (active, packed_bundled_libs, "1.69.0", Some(108081), None),
     /// Allows using the `#![panic_runtime]` attribute.
     (internal, panic_runtime, "1.10.0", Some(32837), None),
+    /// Allows `extern "platform-intrinsic" { ... }`.
+    (internal, platform_intrinsics, "1.4.0", Some(27731), None),
     /// Allows using `#[rustc_allow_const_fn_unstable]`.
     /// This is an attribute on `const fn` for the same
     /// purpose as `#[allow_internal_unstable]`.
@@ -470,8 +483,6 @@ declare_features! (
     (active, impl_trait_in_assoc_type, "1.70.0", Some(63063), None),
     /// Allows `impl Trait` as output type in `Fn` traits in return position of functions.
     (active, impl_trait_in_fn_trait_return, "1.64.0", Some(99697), None),
-    /// Allows referencing `Self` and projections in impl-trait.
-    (active, impl_trait_projections, "1.67.0", Some(103532), None),
     /// Allows using imported `main` function
     (active, imported_main, "1.53.0", Some(28937), None),
     /// Allows associated types in inherent impls.
@@ -526,8 +537,6 @@ declare_features! (
     (active, object_safe_for_dispatch, "1.40.0", Some(43561), None),
     /// Allows using `#[optimize(X)]`.
     (active, optimize_attribute, "1.34.0", Some(54882), None),
-    /// Allows `extern "platform-intrinsic" { ... }`.
-    (active, platform_intrinsics, "1.4.0", Some(27731), None),
     /// Allows using `#![plugin(myplugin)]`.
     (active, plugin, "1.0.0", Some(29597), None),
     /// Allows exhaustive integer pattern matching on `usize` and `isize`.

@@ -232,20 +232,11 @@ fn clean_poly_trait_ref_with_bindings<'tcx>(
     poly_trait_ref: ty::PolyTraitRef<'tcx>,
     bindings: ThinVec<TypeBinding>,
 ) -> GenericBound {
-    // collect any late bound regions
-    let late_bound_regions: Vec<_> = cx
-        .tcx
-        .collect_referenced_late_bound_regions(&poly_trait_ref)
-        .into_iter()
-        .filter_map(|br| match br {
-            ty::BrNamed(_, name) if br.is_named() => Some(GenericParamDef::lifetime(name)),
-            _ => None,
-        })
-        .collect();
-
-    let trait_ = clean_trait_ref_with_bindings(cx, poly_trait_ref, bindings);
     GenericBound::TraitBound(
-        PolyTrait { trait_, generic_params: late_bound_regions },
+        PolyTrait {
+            trait_: clean_trait_ref_with_bindings(cx, poly_trait_ref, bindings),
+            generic_params: clean_bound_vars(poly_trait_ref.bound_vars()),
+        },
         hir::TraitBoundModifier::None,
     )
 }
@@ -338,9 +329,8 @@ fn clean_where_predicate<'tcx>(
         },
 
         hir::WherePredicate::EqPredicate(ref wrp) => WherePredicate::EqPredicate {
-            lhs: Box::new(clean_ty(wrp.lhs_ty, cx)),
-            rhs: Box::new(clean_ty(wrp.rhs_ty, cx).into()),
-            bound_params: Vec::new(),
+            lhs: clean_ty(wrp.lhs_ty, cx),
+            rhs: clean_ty(wrp.rhs_ty, cx).into(),
         },
     })
 }
@@ -436,20 +426,9 @@ fn clean_projection_predicate<'tcx>(
     pred: ty::Binder<'tcx, ty::ProjectionPredicate<'tcx>>,
     cx: &mut DocContext<'tcx>,
 ) -> WherePredicate {
-    let late_bound_regions = cx
-        .tcx
-        .collect_referenced_late_bound_regions(&pred)
-        .into_iter()
-        .filter_map(|br| match br {
-            ty::BrNamed(_, name) if br.is_named() => Some(GenericParamDef::lifetime(name)),
-            _ => None,
-        })
-        .collect();
-
     WherePredicate::EqPredicate {
-        lhs: Box::new(clean_projection(pred.map_bound(|p| p.projection_ty), cx, None)),
-        rhs: Box::new(clean_middle_term(pred.map_bound(|p| p.term), cx)),
-        bound_params: late_bound_regions,
+        lhs: clean_projection(pred.map_bound(|p| p.projection_ty), cx, None),
+        rhs: clean_middle_term(pred.map_bound(|p| p.term), cx),
     }
 }
 
@@ -703,8 +682,8 @@ pub(crate) fn clean_generics<'tcx>(
                     }
                 }
             }
-            WherePredicate::EqPredicate { lhs, rhs, bound_params } => {
-                eq_predicates.push(WherePredicate::EqPredicate { lhs, rhs, bound_params });
+            WherePredicate::EqPredicate { lhs, rhs } => {
+                eq_predicates.push(WherePredicate::EqPredicate { lhs, rhs });
             }
         }
     }
@@ -793,15 +772,14 @@ fn clean_ty_generics<'tcx>(
                 }
                 Some(clean_generic_param_def(param, cx))
             }
+            ty::GenericParamDefKind::Const { is_host_effect: true, .. } => None,
             ty::GenericParamDefKind::Const { .. } => Some(clean_generic_param_def(param, cx)),
         })
         .collect::<ThinVec<GenericParamDef>>();
 
-    // param index -> [(trait DefId, associated type name & generics, term, higher-ranked params)]
-    let mut impl_trait_proj = FxHashMap::<
-        u32,
-        Vec<(DefId, PathSegment, ty::Binder<'_, ty::Term<'_>>, Vec<GenericParamDef>)>,
-    >::default();
+    // param index -> [(trait DefId, associated type name & generics, term)]
+    let mut impl_trait_proj =
+        FxHashMap::<u32, Vec<(DefId, PathSegment, ty::Binder<'_, ty::Term<'_>>)>>::default();
 
     let where_predicates = preds
         .predicates
@@ -853,11 +831,6 @@ fn clean_ty_generics<'tcx>(
                         trait_did,
                         name,
                         proj.map_bound(|p| p.term),
-                        pred.get_bound_params()
-                            .into_iter()
-                            .flatten()
-                            .cloned()
-                            .collect(),
                     ));
                 }
 
@@ -893,9 +866,9 @@ fn clean_ty_generics<'tcx>(
 
         let crate::core::ImplTraitParam::ParamIndex(idx) = param else { unreachable!() };
         if let Some(proj) = impl_trait_proj.remove(&idx) {
-            for (trait_did, name, rhs, bound_params) in proj {
+            for (trait_did, name, rhs) in proj {
                 let rhs = clean_middle_term(rhs, cx);
-                simplify::merge_bounds(cx, &mut bounds, bound_params, trait_did, name, &rhs);
+                simplify::merge_bounds(cx, &mut bounds, trait_did, name, &rhs);
             }
         }
 
@@ -1107,10 +1080,7 @@ fn clean_function<'tcx>(
                 clean_args_from_types_and_names(cx, sig.decl.inputs, names)
             }
         };
-        let mut decl = clean_fn_decl_with_args(cx, sig.decl, args);
-        if sig.header.is_async() {
-            decl.output = decl.sugared_async_return_type();
-        }
+        let decl = clean_fn_decl_with_args(cx, sig.decl, Some(&sig.header), args);
         (generics, decl)
     });
     Box::new(Function { decl, generics })
@@ -1161,12 +1131,16 @@ fn clean_args_from_types_and_body_id<'tcx>(
 fn clean_fn_decl_with_args<'tcx>(
     cx: &mut DocContext<'tcx>,
     decl: &hir::FnDecl<'tcx>,
+    header: Option<&hir::FnHeader>,
     args: Arguments,
 ) -> FnDecl {
-    let output = match decl.output {
+    let mut output = match decl.output {
         hir::FnRetTy::Return(typ) => clean_ty(typ, cx),
         hir::FnRetTy::DefaultReturn(..) => Type::Tuple(Vec::new()),
     };
+    if let Some(header) = header && header.is_async() {
+        output = output.sugared_async_return_type();
+    }
     FnDecl { inputs: args, output, c_variadic: decl.c_variadic }
 }
 
@@ -1179,7 +1153,17 @@ fn clean_fn_decl_from_did_and_sig<'tcx>(
 
     // We assume all empty tuples are default return type. This theoretically can discard `-> ()`,
     // but shouldn't change any code meaning.
-    let output = clean_middle_ty(sig.output(), cx, None, None);
+    let mut output = clean_middle_ty(sig.output(), cx, None, None);
+
+    // If the return type isn't an `impl Trait`, we can safely assume that this
+    // function isn't async without needing to execute the query `asyncness` at
+    // all which gives us a noticeable performance boost.
+    if let Some(did) = did
+        && let Type::ImplTrait(_) = output
+        && cx.tcx.asyncness(did).is_async()
+    {
+        output = output.sugared_async_return_type();
+    }
 
     FnDecl {
         output,
@@ -1351,23 +1335,13 @@ pub(crate) fn clean_middle_assoc_item<'tcx>(
         }
         ty::AssocKind::Fn => {
             let sig = tcx.fn_sig(assoc_item.def_id).instantiate_identity();
-
-            let late_bound_regions = sig.bound_vars().into_iter().filter_map(|var| match var {
-                ty::BoundVariableKind::Region(ty::BrNamed(_, name))
-                    if name != kw::UnderscoreLifetime =>
-                {
-                    Some(GenericParamDef::lifetime(name))
-                }
-                _ => None,
-            });
-
             let mut generics = clean_ty_generics(
                 cx,
                 tcx.generics_of(assoc_item.def_id),
                 tcx.explicit_predicates_of(assoc_item.def_id),
             );
             // FIXME: This does not place parameters in source order (late-bound ones come last)
-            generics.params.extend(late_bound_regions);
+            generics.params.extend(clean_bound_vars(sig.bound_vars()));
 
             let mut decl = clean_fn_decl_from_did_and_sig(cx, Some(assoc_item.def_id), sig);
 
@@ -1752,7 +1726,7 @@ fn maybe_expand_private_type_alias<'tcx>(
     cx: &mut DocContext<'tcx>,
     path: &hir::Path<'tcx>,
 ) -> Option<Type> {
-    let Res::Def(DefKind::TyAlias { .. }, def_id) = path.res else { return None };
+    let Res::Def(DefKind::TyAlias, def_id) = path.res else { return None };
     // Substitute private type aliases
     let def_id = def_id.as_local()?;
     let alias = if !cx.cache.effective_visibilities.is_exported(cx.tcx, def_id.to_def_id())
@@ -2021,7 +1995,7 @@ impl<'tcx> ContainerTy<'tcx> {
                 let (DefKind::Struct
                 | DefKind::Union
                 | DefKind::Enum
-                | DefKind::TyAlias { .. }
+                | DefKind::TyAlias
                 | DefKind::Trait) = tcx.def_kind(container)
                 else {
                     return ObjectLifetimeDefault::Empty;
@@ -2103,9 +2077,11 @@ pub(crate) fn clean_middle_ty<'tcx>(
             // FIXME: should we merge the outer and inner binders somehow?
             let sig = bound_ty.skip_binder().fn_sig(cx.tcx);
             let decl = clean_fn_decl_from_did_and_sig(cx, None, sig);
+            let generic_params = clean_bound_vars(sig.bound_vars());
+
             BareFunction(Box::new(BareFunctionDecl {
                 unsafety: sig.unsafety(),
-                generic_params: Vec::new(),
+                generic_params,
                 decl,
                 abi: sig.abi(),
             }))
@@ -2181,8 +2157,8 @@ pub(crate) fn clean_middle_ty<'tcx>(
 
             let late_bound_regions: FxIndexSet<_> = obj
                 .iter()
-                .flat_map(|pb| pb.bound_vars())
-                .filter_map(|br| match br {
+                .flat_map(|pred| pred.bound_vars())
+                .filter_map(|var| match var {
                     ty::BoundVariableKind::Region(ty::BrNamed(_, name))
                         if name != kw::UnderscoreLifetime =>
                     {
@@ -2256,6 +2232,11 @@ pub(crate) fn clean_middle_ty<'tcx>(
             }
         }
 
+        ty::Bound(_, ref ty) => match ty.kind {
+            ty::BoundTyKind::Param(_, name) => Generic(name),
+            ty::BoundTyKind::Anon => panic!("unexpected anonymous bound type variable"),
+        },
+
         ty::Alias(ty::Opaque, ty::AliasTy { def_id, args, .. }) => {
             // If it's already in the same alias, don't get an infinite loop.
             if cx.current_type_aliases.contains_key(&def_id) {
@@ -2284,10 +2265,8 @@ pub(crate) fn clean_middle_ty<'tcx>(
 
         ty::Closure(..) => panic!("Closure"),
         ty::Generator(..) => panic!("Generator"),
-        ty::Bound(..) => panic!("Bound"),
         ty::Placeholder(..) => panic!("Placeholder"),
         ty::GeneratorWitness(..) => panic!("GeneratorWitness"),
-        ty::GeneratorWitnessMIR(..) => panic!("GeneratorWitnessMIR"),
         ty::Infer(..) => panic!("Infer"),
         ty::Error(_) => rustc_errors::FatalError.raise(),
     }
@@ -2566,7 +2545,7 @@ fn clean_bare_fn_ty<'tcx>(
             .map(|x| clean_generic_param(cx, None, x))
             .collect();
         let args = clean_args_from_types_and_names(cx, bare_fn.decl.inputs, bare_fn.param_names);
-        let decl = clean_fn_decl_with_args(cx, bare_fn.decl, args);
+        let decl = clean_fn_decl_with_args(cx, bare_fn.decl, None, args);
         (generic_params, decl)
     });
     BareFunctionDecl { unsafety: bare_fn.unsafety, abi: bare_fn.abi, decl, generic_params }
@@ -2854,7 +2833,7 @@ fn clean_impl<'tcx>(
     let for_ = clean_ty(impl_.self_ty, cx);
     let type_alias =
         for_.def_id(&cx.cache).and_then(|alias_def_id: DefId| match tcx.def_kind(alias_def_id) {
-            DefKind::TyAlias { .. } => Some(clean_middle_ty(
+            DefKind::TyAlias => Some(clean_middle_ty(
                 ty::Binder::dummy(tcx.type_of(def_id).instantiate_identity()),
                 cx,
                 Some(def_id.to_def_id()),
@@ -3077,7 +3056,7 @@ fn clean_maybe_renamed_foreign_item<'tcx>(
                     // NOTE: generics must be cleaned before args
                     let generics = clean_generics(generics, cx);
                     let args = clean_args_from_types_and_names(cx, decl.inputs, names);
-                    let decl = clean_fn_decl_with_args(cx, decl, args);
+                    let decl = clean_fn_decl_with_args(cx, decl, None, args);
                     (generics, decl)
                 });
                 ForeignFunctionItem(Box::new(Function { decl, generics }))
@@ -3115,4 +3094,31 @@ fn clean_type_binding<'tcx>(
             },
         },
     }
+}
+
+fn clean_bound_vars<'tcx>(
+    bound_vars: &'tcx ty::List<ty::BoundVariableKind>,
+) -> Vec<GenericParamDef> {
+    bound_vars
+        .into_iter()
+        .filter_map(|var| match var {
+            ty::BoundVariableKind::Region(ty::BrNamed(_, name))
+                if name != kw::UnderscoreLifetime =>
+            {
+                Some(GenericParamDef::lifetime(name))
+            }
+            ty::BoundVariableKind::Ty(ty::BoundTyKind::Param(did, name)) => Some(GenericParamDef {
+                name,
+                kind: GenericParamDefKind::Type {
+                    did,
+                    bounds: Vec::new(),
+                    default: None,
+                    synthetic: false,
+                },
+            }),
+            // FIXME(non_lifetime_binders): Support higher-ranked const parameters.
+            ty::BoundVariableKind::Const => None,
+            _ => None,
+        })
+        .collect()
 }

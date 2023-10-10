@@ -813,7 +813,6 @@ impl Input {
                 FileName::Anon(_) => None,
                 FileName::MacroExpansion(_) => None,
                 FileName::ProcMacroSourceCode(_) => None,
-                FileName::CfgSpec(_) => None,
                 FileName::CliCrateAttr(_) => None,
                 FileName::Custom(_) => None,
                 FileName::DocTest(path, _) => Some(path),
@@ -2475,6 +2474,19 @@ pub fn parse_externs(
             Some((opts, name)) => (Some(opts), name.to_string()),
         };
 
+        if !crate::utils::is_ascii_ident(&name) {
+            let mut error = handler.early_struct_error(format!(
+                "crate name `{name}` passed to `--extern` is not a valid ASCII identifier"
+            ));
+            let adjusted_name = name.replace("-", "_");
+            if crate::utils::is_ascii_ident(&adjusted_name) {
+                error.help(format!(
+                    "consider replacing the dashes with underscores: `{adjusted_name}`"
+                ));
+            }
+            error.emit();
+        }
+
         let path = path.map(|p| CanonicalizedPath::new(p));
 
         let entry = externs.entry(name.to_owned());
@@ -3155,9 +3167,9 @@ impl PpMode {
 pub(crate) mod dep_tracking {
     use super::{
         BranchProtection, CFGuard, CFProtection, CrateType, DebugInfo, DebugInfoCompression,
-        ErrorOutputType, InstrumentCoverage, InstrumentXRay, LdImpl, LinkerPluginLto,
-        LocationDetail, LtoCli, OomStrategy, OptLevel, OutFileName, OutputType, OutputTypes,
-        Passes, ResolveDocLinks, SourceFileHashAlgorithm, SplitDwarfKind, SwitchWithOptPath,
+        ErrorOutputType, InstrumentCoverage, InstrumentXRay, LinkerPluginLto, LocationDetail,
+        LtoCli, OomStrategy, OptLevel, OutFileName, OutputType, OutputTypes, Passes,
+        ResolveDocLinks, SourceFileHashAlgorithm, SplitDwarfKind, SwitchWithOptPath,
         SymbolManglingVersion, TraitSolver, TrimmedDefPaths,
     };
     use crate::lint;
@@ -3254,7 +3266,6 @@ pub(crate) mod dep_tracking {
         SymbolManglingVersion,
         SourceFileHashAlgorithm,
         TrimmedDefPaths,
-        Option<LdImpl>,
         OutFileName,
         OutputType,
         RealFileName,

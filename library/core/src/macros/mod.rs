@@ -321,6 +321,95 @@ pub macro debug_assert_matches($($arg:tt)*) {
     }
 }
 
+/// A macro for defining `#[cfg]` match-like statements.
+///
+/// It is similar to the `if/elif` C preprocessor macro by allowing definition of a cascade of
+/// `#[cfg]` cases, emitting the implementation which matches first.
+///
+/// This allows you to conveniently provide a long list `#[cfg]`'d blocks of code
+/// without having to rewrite each clause multiple times.
+///
+/// Trailing `_` wildcard match arms are **optional** and they indicate a fallback branch when
+/// all previous declarations do not evaluate to true.
+///
+/// # Example
+///
+/// ```
+/// #![feature(cfg_match)]
+///
+/// cfg_match! {
+///     cfg(unix) => {
+///         fn foo() { /* unix specific functionality */ }
+///     }
+///     cfg(target_pointer_width = "32") => {
+///         fn foo() { /* non-unix, 32-bit functionality */ }
+///     }
+///     _ => {
+///         fn foo() { /* fallback implementation */ }
+///     }
+/// }
+/// ```
+#[macro_export]
+#[unstable(feature = "cfg_match", issue = "115585")]
+#[rustc_diagnostic_item = "cfg_match"]
+macro_rules! cfg_match {
+    // with a final wildcard
+    (
+        $(cfg($initial_meta:meta) => { $($initial_tokens:item)* })+
+        _ => { $($extra_tokens:item)* }
+    ) => {
+        cfg_match! {
+            @__items ();
+            $((($initial_meta) ($($initial_tokens)*)),)+
+            (() ($($extra_tokens)*)),
+        }
+    };
+
+    // without a final wildcard
+    (
+        $(cfg($extra_meta:meta) => { $($extra_tokens:item)* })*
+    ) => {
+        cfg_match! {
+            @__items ();
+            $((($extra_meta) ($($extra_tokens)*)),)*
+        }
+    };
+
+    // Internal and recursive macro to emit all the items
+    //
+    // Collects all the previous cfgs in a list at the beginning, so they can be
+    // negated. After the semicolon is all the remaining items.
+    (@__items ($($_:meta,)*);) => {};
+    (
+        @__items ($($no:meta,)*);
+        (($($yes:meta)?) ($($tokens:item)*)),
+        $($rest:tt,)*
+    ) => {
+        // Emit all items within one block, applying an appropriate #[cfg]. The
+        // #[cfg] will require all `$yes` matchers specified and must also negate
+        // all previous matchers.
+        #[cfg(all(
+            $($yes,)?
+            not(any($($no),*))
+        ))]
+        cfg_match! { @__identity $($tokens)* }
+
+        // Recurse to emit all other items in `$rest`, and when we do so add all
+        // our `$yes` matchers to the list of `$no` matchers as future emissions
+        // will have to negate everything we just matched as well.
+        cfg_match! {
+            @__items ($($no,)* $($yes,)?);
+            $($rest,)*
+        }
+    };
+
+    // Internal macro to make __apply work out right for different match types,
+    // because of how macros match/expand stuff.
+    (@__identity $($tokens:item)*) => {
+        $($tokens)*
+    };
+}
+
 /// Returns whether the given expression matches any of the given patterns.
 ///
 /// Like in a `match` expression, the pattern can be optionally followed by `if`
@@ -630,7 +719,8 @@ macro_rules! unreachable {
 /// The difference between `unimplemented!` and [`todo!`] is that while `todo!`
 /// conveys an intent of implementing the functionality later and the message is "not yet
 /// implemented", `unimplemented!` makes no such claims. Its message is "not implemented".
-/// Also some IDEs will mark `todo!`s.
+///
+/// Also, some IDEs will mark `todo!`s.
 ///
 /// # Panics
 ///
@@ -716,11 +806,15 @@ macro_rules! unimplemented {
 /// The difference between [`unimplemented!`] and `todo!` is that while `todo!` conveys
 /// an intent of implementing the functionality later and the message is "not yet
 /// implemented", `unimplemented!` makes no such claims. Its message is "not implemented".
-/// Also some IDEs will mark `todo!`s.
+///
+/// Also, some IDEs will mark `todo!`s.
 ///
 /// # Panics
 ///
-/// This will always [`panic!`].
+/// This will always [`panic!`] because `todo!` is just a shorthand for `panic!` with a
+/// fixed, specific message.
+///
+/// Like `panic!`, this macro has a second form for displaying custom values.
 ///
 /// # Examples
 ///
@@ -728,30 +822,39 @@ macro_rules! unimplemented {
 ///
 /// ```
 /// trait Foo {
-///     fn bar(&self);
+///     fn bar(&self) -> u8;
 ///     fn baz(&self);
+///     fn qux(&self) -> Result<u64, ()>;
 /// }
 /// ```
 ///
 /// We want to implement `Foo` on one of our types, but we also want to work on
 /// just `bar()` first. In order for our code to compile, we need to implement
-/// `baz()`, so we can use `todo!`:
+/// `baz()` and `qux()`, so we can use `todo!`:
 ///
 /// ```
 /// # trait Foo {
-/// #     fn bar(&self);
+/// #     fn bar(&self) -> u8;
 /// #     fn baz(&self);
+/// #     fn qux(&self) -> Result<u64, ()>;
 /// # }
 /// struct MyStruct;
 ///
 /// impl Foo for MyStruct {
-///     fn bar(&self) {
-///         // implementation goes here
+///     fn bar(&self) -> u8 {
+///         1 + 1
 ///     }
 ///
 ///     fn baz(&self) {
-///         // let's not worry about implementing baz() for now
+///         // Let's not worry about implementing baz() for now
 ///         todo!();
+///     }
+///
+///     fn qux(&self) -> Result<u64, ()> {
+///         // We can add a message to todo! to display our omission.
+///         // This will display:
+///         // "thread 'main' panicked at 'not yet implemented: MyStruct is not yet quxable'".
+///         todo!("MyStruct is not yet quxable");
 ///     }
 /// }
 ///
@@ -759,7 +862,7 @@ macro_rules! unimplemented {
 ///     let s = MyStruct;
 ///     s.bar();
 ///
-///     // we aren't even using baz(), so this is fine.
+///     // We aren't even using baz() or qux(), so this is fine.
 /// }
 /// ```
 #[macro_export]

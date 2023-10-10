@@ -13,7 +13,7 @@ use rustc_middle::ty::layout::{
     self, FnAbiError, FnAbiOfHelpers, FnAbiRequest, LayoutError, LayoutOf, LayoutOfHelpers,
     TyAndLayout,
 };
-use rustc_middle::ty::{self, GenericArgsRef, ParamEnv, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, GenericArgsRef, ParamEnv, Ty, TyCtxt, TypeFoldable, Variance};
 use rustc_mir_dataflow::storage::always_storage_live_locals;
 use rustc_session::Limit;
 use rustc_span::Span;
@@ -384,7 +384,7 @@ pub(super) fn mir_assign_valid_types<'tcx>(
     // all normal lifetimes are erased, higher-ranked types with their
     // late-bound lifetimes are still around and can lead to type
     // differences.
-    if util::is_subtype(tcx, param_env, src.ty, dest.ty) {
+    if util::relate_types(tcx, param_env, Variance::Covariant, src.ty, dest.ty) {
         // Make sure the layout is equal, too -- just to be safe. Miri really
         // needs layout equality. For performance reason we skip this check when
         // the types are equal. Equal types *can* have different layouts when
@@ -416,7 +416,7 @@ pub(super) fn from_known_layout<'tcx>(
                 if !mir_assign_valid_types(tcx.tcx, param_env, check_layout, known_layout) {
                     span_bug!(
                         tcx.span,
-                        "expected type differs from actual type.\nexpected: {:?}\nactual: {:?}",
+                        "expected type differs from actual type.\nexpected: {}\nactual: {}",
                         known_layout.ty,
                         check_layout.ty,
                     );
@@ -569,7 +569,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
     ) -> Result<T, ErrorHandled> {
         frame
             .instance
-            .try_subst_mir_and_normalize_erasing_regions(
+            .try_instantiate_mir_and_normalize_erasing_regions(
                 *self.tcx,
                 self.param_env,
                 ty::EarlyBinder::bind(value),
@@ -712,7 +712,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
             ty::Foreign(_) => Ok(None),
 
-            _ => span_bug!(self.cur_span(), "size_and_align_of::<{:?}> not supported", layout.ty),
+            _ => span_bug!(self.cur_span(), "size_and_align_of::<{}> not supported", layout.ty),
         }
     }
     #[inline]
@@ -750,12 +750,14 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
         // Make sure all the constants required by this frame evaluate successfully (post-monomorphization check).
         if M::POST_MONO_CHECKS {
-            // `ctfe_query` does some error message decoration that we want to be in effect here.
-            self.ctfe_query(None, |tcx| {
-                body.post_mono_checks(*tcx, self.param_env, |c| {
-                    self.subst_from_current_frame_and_normalize_erasing_regions(c)
-                })
-            })?;
+            for &const_ in &body.required_consts {
+                let c =
+                    self.subst_from_current_frame_and_normalize_erasing_regions(const_.const_)?;
+                c.eval(*self.tcx, self.param_env, Some(const_.span)).map_err(|err| {
+                    err.emit_note(*self.tcx);
+                    err
+                })?;
+            }
         }
 
         // done
@@ -963,7 +965,6 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 | ty::Ref(..)
                 | ty::Generator(..)
                 | ty::GeneratorWitness(..)
-                | ty::GeneratorWitnessMIR(..)
                 | ty::Array(..)
                 | ty::Closure(..)
                 | ty::Never
@@ -982,7 +983,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
 
                 ty::Bound(..)
                 | ty::Infer(ty::FreshTy(_) | ty::FreshIntTy(_) | ty::FreshFloatTy(_)) => {
-                    bug!("`is_very_trivially_sized` applied to unexpected type: {:?}", ty)
+                    bug!("`is_very_trivially_sized` applied to unexpected type: {}", ty)
                 }
             }
         }
@@ -1055,14 +1056,14 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         Ok(())
     }
 
-    /// Call a query that can return `ErrorHandled`. If `span` is `Some`, point to that span when an error occurs.
+    /// Call a query that can return `ErrorHandled`. Should be used for statics and other globals.
+    /// (`mir::Const`/`ty::Const` have `eval` methods that can be used directly instead.)
     pub fn ctfe_query<T>(
         &self,
-        span: Option<Span>,
         query: impl FnOnce(TyCtxtAt<'tcx>) -> Result<T, ErrorHandled>,
     ) -> Result<T, ErrorHandled> {
         // Use a precise span for better cycle errors.
-        query(self.tcx.at(span.unwrap_or_else(|| self.cur_span()))).map_err(|err| {
+        query(self.tcx.at(self.cur_span())).map_err(|err| {
             err.emit_note(*self.tcx);
             err
         })
@@ -1083,17 +1084,22 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         } else {
             self.param_env
         };
-        let val = self.ctfe_query(None, |tcx| tcx.eval_to_allocation_raw(param_env.and(gid)))?;
+        let val = self.ctfe_query(|tcx| tcx.eval_to_allocation_raw(param_env.and(gid)))?;
         self.raw_const_to_mplace(val)
     }
 
     pub fn eval_mir_constant(
         &self,
-        val: &mir::ConstantKind<'tcx>,
+        val: &mir::Const<'tcx>,
         span: Option<Span>,
         layout: Option<TyAndLayout<'tcx>>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
-        let const_val = self.ctfe_query(span, |tcx| val.eval(*tcx, self.param_env, span))?;
+        let const_val = val.eval(*self.tcx, self.param_env, span).map_err(|err| {
+            // FIXME: somehow this is reachable even when POST_MONO_CHECKS is on.
+            // Are we not always populating `required_consts`?
+            err.emit_note(*self.tcx);
+            err
+        })?;
         self.const_val_to_op(const_val, val.ty(), layout)
     }
 

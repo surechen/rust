@@ -66,7 +66,6 @@ infer_await_both_futures = consider `await`ing on both `Future`s
 infer_await_future = consider `await`ing on the `Future`
 infer_await_note = calling an async function returns a future
 
-infer_borrowed_too_long = a value of type `{$ty}` is borrowed for too long
 infer_but_calling_introduces = {$has_param_name ->
     [true] `{$param_name}`
     *[false] `fn` parameter
@@ -181,8 +180,6 @@ infer_more_targeted = {$has_param_name ->
 } but calling `{$ident}` introduces an implicit `'static` lifetime requirement
 
 infer_msl_introduces_static = introduces a `'static` lifetime requirement
-infer_msl_trait_note = this has an implicit `'static` lifetime requirement
-infer_msl_trait_sugg = consider relaxing the implicit `'static` requirement
 infer_msl_unmet_req = because this has an unmet lifetime requirement
 infer_need_type_info_in_generator =
     type inside {$generator_kind ->
@@ -198,6 +195,10 @@ infer_nothing = {""}
 infer_oc_cant_coerce = cannot coerce intrinsics to function pointers
 infer_oc_closure_selfref = closure/generator type that references itself
 infer_oc_const_compat = const not compatible with trait
+infer_oc_fn_lang_correct_type = {$lang_item_name ->
+        [panic_impl] `#[panic_handler]`
+        *[lang_item_name] lang item `{$lang_item_name}`
+    } function has wrong type
 infer_oc_fn_main_correct_type = `main` function has wrong type
 infer_oc_fn_start_correct_type = `#[start]` function has wrong type
 infer_oc_generic = mismatched types
@@ -229,7 +230,6 @@ infer_prlf_known_limitation = this is a known limitation that will be removed in
 infer_prlf_must_outlive_with_sup = ...must outlive the lifetime `{$sup_symbol}` defined here
 infer_prlf_must_outlive_without_sup = ...must outlive the lifetime defined here
 infer_reborrow = ...so that reference does not outlive borrowed content
-infer_reborrow_upvar = ...so that closure can access `{$name}`
 infer_ref_longer_than_data = in type `{$ty}`, reference has a longer lifetime than the data it references
 
 infer_reference_outlives_referent = ...so that the reference type `{$name}` does not outlive the data it points at
@@ -337,6 +337,7 @@ infer_subtype = ...so that the {$requirement ->
     [no_else] `if` missing an `else` returns `()`
     [fn_main_correct_type] `main` function has the correct type
     [fn_start_correct_type] `#[start]` function has the correct type
+    [fn_lang_correct_type] lang item function has the correct type
     [intrinsic_correct_type] intrinsic has the correct type
     [method_correct_type] method receiver has the correct type
     *[other] types are compatible
@@ -350,6 +351,7 @@ infer_subtype_2 = ...so that {$requirement ->
     [no_else] `if` missing an `else` returns `()`
     [fn_main_correct_type] `main` function has the correct type
     [fn_start_correct_type] `#[start]` function has the correct type
+    [fn_lang_correct_type] lang item function has the correct type
     [intrinsic_correct_type] intrinsic has the correct type
     [method_correct_type] method receiver has the correct type
     *[other] types are compatible

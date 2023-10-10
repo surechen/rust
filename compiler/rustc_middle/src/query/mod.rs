@@ -7,7 +7,6 @@
 #![allow(unused_parens)]
 
 use crate::dep_graph;
-use crate::dep_graph::DepKind;
 use crate::infer::canonical::{self, Canonical};
 use crate::lint::LintExpectation;
 use crate::metadata::ModChild;
@@ -45,7 +44,6 @@ use crate::traits::{
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::layout::ValidityRequirement;
 use crate::ty::util::AlwaysRequiresDrop;
-use crate::ty::GeneratorDiagnosticData;
 use crate::ty::TyCtxtFeed;
 use crate::ty::{
     self, print::describe_as_module, CrateInherentImpls, ParamEnvAnd, Ty, TyCtxt,
@@ -231,7 +229,7 @@ rustc_queries! {
             action = {
                 use rustc_hir::def::DefKind;
                 match tcx.def_kind(key) {
-                    DefKind::TyAlias { .. } => "expanding type alias",
+                    DefKind::TyAlias => "expanding type alias",
                     DefKind::TraitAlias => "expanding trait alias",
                     _ => "computing type of",
                 }
@@ -251,6 +249,14 @@ rustc_queries! {
             "computing type of opaque `{path}`",
             path = tcx.def_path_str(key),
         }
+    }
+
+    query type_alias_is_lazy(key: DefId) -> bool {
+        desc { |tcx|
+            "computing whether `{path}` is a lazy type alias",
+            path = tcx.def_path_str(key),
+        }
+        separate_provide_extern
     }
 
     query collect_return_position_impl_trait_in_trait_tys(key: DefId)
@@ -731,7 +737,7 @@ rustc_queries! {
         separate_provide_extern
     }
 
-    query asyncness(key: DefId) -> hir::IsAsync {
+    query asyncness(key: DefId) -> ty::Asyncness {
         desc { |tcx| "checking if the function is async: `{}`", tcx.def_path_str(key) }
         separate_provide_extern
     }
@@ -1099,16 +1105,6 @@ rustc_queries! {
     /// of their fields.
     query destructure_const(key: ty::Const<'tcx>) -> ty::DestructuredConst<'tcx> {
         desc { "destructuring type level constant"}
-    }
-
-    /// Tries to destructure an `mir::ConstantKind` ADT or array into its variant index
-    /// and its field values. This should only be used for pretty printing.
-    query try_destructure_mir_constant_for_diagnostics(
-        key: (mir::ConstValue<'tcx>, Ty<'tcx>)
-    ) -> Option<mir::DestructuredConstant<'tcx>> {
-        desc { "destructuring MIR constant"}
-        no_hash
-        eval_always
     }
 
     query const_caller_location(key: (rustc_span::Symbol, u32, u32)) -> mir::ConstValue<'tcx> {
@@ -2158,12 +2154,6 @@ rustc_queries! {
         arena_cache
         eval_always
         desc { "computing the backend features for CLI flags" }
-    }
-
-    query generator_diagnostic_data(key: DefId) -> &'tcx Option<GeneratorDiagnosticData<'tcx>> {
-        arena_cache
-        desc { |tcx| "looking up generator diagnostic data of `{}`", tcx.def_path_str(key) }
-        separate_provide_extern
     }
 
     query check_validity_requirement(key: (ValidityRequirement, ty::ParamEnvAnd<'tcx, Ty<'tcx>>)) -> Result<bool, &'tcx ty::layout::LayoutError<'tcx>> {

@@ -10,6 +10,8 @@
 //!   and the relative position of the access;
 //! - idempotency properties asserted in `perms.rs` (for optimizations)
 
+use std::fmt;
+
 use smallvec::SmallVec;
 
 use rustc_const_eval::interpret::InterpResult;
@@ -26,8 +28,10 @@ use crate::borrow_tracker::tree_borrows::{
 use crate::borrow_tracker::{AccessKind, GlobalState, ProtectorKind};
 use crate::*;
 
+mod tests;
+
 /// Data for a single *location*.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct LocationState {
     /// A location is initialized when it is child-accessed for the first time (and the initial
     /// retag initializes the location for the range covered by the type), and it then stays
@@ -65,8 +69,23 @@ impl LocationState {
         self
     }
 
+    /// Check if the location has been initialized, i.e. if it has
+    /// ever been accessed through a child pointer.
     pub fn is_initialized(&self) -> bool {
         self.initialized
+    }
+
+    /// Check if the state can exist as the initial permission of a pointer.
+    ///
+    /// Do not confuse with `is_initialized`, the two are almost orthogonal
+    /// as apart from `Active` which is not initial and must be initialized,
+    /// any other permission can have an arbitrary combination of being
+    /// initial/initialized.
+    /// FIXME: when the corresponding `assert` in `tree_borrows/mod.rs` finally
+    /// passes and can be uncommented, remove this `#[allow(dead_code)]`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_initial(&self) -> bool {
+        self.permission.is_initial()
     }
 
     pub fn permission(&self) -> Permission {
@@ -172,6 +191,16 @@ impl LocationState {
     }
 }
 
+impl fmt::Display for LocationState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.permission)?;
+        if !self.initialized {
+            write!(f, "?")?;
+        }
+        Ok(())
+    }
+}
+
 /// Tree structure with both parents and children since we want to be
 /// able to traverse the tree efficiently in both directions.
 #[derive(Clone, Debug)]
@@ -253,6 +282,113 @@ enum ContinueTraversal {
     SkipChildren,
 }
 
+/// Stack of nodes left to explore in a tree traversal.
+struct TreeVisitorStack<NodeApp, ErrHandler> {
+    /// Identifier of the original access.
+    initial: UniIndex,
+    /// Function to apply to each tag.
+    f_propagate: NodeApp,
+    /// Handler to add the required context to diagnostics.
+    err_builder: ErrHandler,
+    /// Mutable state of the visit: the tags left to handle.
+    /// Every tag pushed should eventually be handled,
+    /// and the precise order is relevant for diagnostics.
+    stack: Vec<(UniIndex, AccessRelatedness)>,
+}
+
+impl<NodeApp, InnErr, OutErr, ErrHandler> TreeVisitorStack<NodeApp, ErrHandler>
+where
+    NodeApp: Fn(NodeAppArgs<'_>) -> Result<ContinueTraversal, InnErr>,
+    ErrHandler: Fn(ErrHandlerArgs<'_, InnErr>) -> OutErr,
+{
+    /// Apply the function to the current `tag`, and push its children
+    /// to the stack of future tags to visit.
+    fn exec_and_visit(
+        &mut self,
+        this: &mut TreeVisitor<'_>,
+        idx: UniIndex,
+        exclude: Option<UniIndex>,
+        rel_pos: AccessRelatedness,
+    ) -> Result<(), OutErr> {
+        // 1. apply the propagation function
+        let node = this.nodes.get_mut(idx).unwrap();
+        let recurse =
+            (self.f_propagate)(NodeAppArgs { node, perm: this.perms.entry(idx), rel_pos })
+                .map_err(|error_kind| {
+                    (self.err_builder)(ErrHandlerArgs {
+                        error_kind,
+                        conflicting_info: &this.nodes.get(idx).unwrap().debug_info,
+                        accessed_info: &this.nodes.get(self.initial).unwrap().debug_info,
+                    })
+                })?;
+        let node = this.nodes.get(idx).unwrap();
+        // 2. add the children to the stack for future traversal
+        if matches!(recurse, ContinueTraversal::Recurse) {
+            let general_child_rel = rel_pos.for_child();
+            for &child in node.children.iter() {
+                // Some child might be excluded from here and handled separately,
+                // e.g. the initially accessed tag.
+                if Some(child) != exclude {
+                    // We should still ensure that if we don't skip the initially accessed
+                    // it will receive the proper `AccessRelatedness`.
+                    let this_child_rel = if child == self.initial {
+                        AccessRelatedness::This
+                    } else {
+                        general_child_rel
+                    };
+                    self.stack.push((child, this_child_rel));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn new(initial: UniIndex, f_propagate: NodeApp, err_builder: ErrHandler) -> Self {
+        Self { initial, f_propagate, err_builder, stack: Vec::new() }
+    }
+
+    /// Finish the exploration by applying `exec_and_visit` until
+    /// the stack is empty.
+    fn finish(&mut self, visitor: &mut TreeVisitor<'_>) -> Result<(), OutErr> {
+        while let Some((idx, rel_pos)) = self.stack.pop() {
+            self.exec_and_visit(visitor, idx, /* no children to exclude */ None, rel_pos)?;
+        }
+        Ok(())
+    }
+
+    /// Push all ancestors to the exploration stack in order of nearest ancestor
+    /// towards the top.
+    fn push_and_visit_strict_ancestors(
+        &mut self,
+        visitor: &mut TreeVisitor<'_>,
+    ) -> Result<(), OutErr> {
+        let mut path_ascend = Vec::new();
+        // First climb to the root while recording the path
+        let mut curr = self.initial;
+        while let Some(ancestor) = visitor.nodes.get(curr).unwrap().parent {
+            path_ascend.push((ancestor, curr));
+            curr = ancestor;
+        }
+        // Then descend:
+        // - execute f_propagate on each node
+        // - record children in visit
+        while let Some((ancestor, next_in_path)) = path_ascend.pop() {
+            // Explore ancestors in descending order.
+            // `next_in_path` is excluded from the recursion because it
+            // will be the `ancestor` of the next iteration.
+            // It also needs a different `AccessRelatedness` than the other
+            // children of `ancestor`.
+            self.exec_and_visit(
+                visitor,
+                ancestor,
+                Some(next_in_path),
+                AccessRelatedness::StrictChildAccess,
+            )?;
+        }
+        Ok(())
+    }
+}
+
 impl<'tree> TreeVisitor<'tree> {
     // Applies `f_propagate` to every vertex of the tree top-down in the following order: first
     // all ancestors of `start`, then `start` itself, then children of `start`, then the rest.
@@ -269,107 +405,40 @@ impl<'tree> TreeVisitor<'tree> {
         start: BorTag,
         f_propagate: impl Fn(NodeAppArgs<'_>) -> Result<ContinueTraversal, InnErr>,
         err_builder: impl Fn(ErrHandlerArgs<'_, InnErr>) -> OutErr,
-    ) -> Result<(), OutErr>
-where {
-        struct TreeVisitAux<NodeApp, ErrHandler> {
-            accessed_tag: UniIndex,
-            f_propagate: NodeApp,
-            err_builder: ErrHandler,
-            stack: Vec<(UniIndex, AccessRelatedness)>,
-        }
-        impl<NodeApp, InnErr, OutErr, ErrHandler> TreeVisitAux<NodeApp, ErrHandler>
-        where
-            NodeApp: Fn(NodeAppArgs<'_>) -> Result<ContinueTraversal, InnErr>,
-            ErrHandler: Fn(ErrHandlerArgs<'_, InnErr>) -> OutErr,
-        {
-            fn pop(&mut self) -> Option<(UniIndex, AccessRelatedness)> {
-                self.stack.pop()
-            }
-
-            /// Apply the function to the current `tag`, and push its children
-            /// to the stack of future tags to visit.
-            fn exec_and_visit(
-                &mut self,
-                this: &mut TreeVisitor<'_>,
-                tag: UniIndex,
-                exclude: Option<UniIndex>,
-                rel_pos: AccessRelatedness,
-            ) -> Result<(), OutErr> {
-                // 1. apply the propagation function
-                let node = this.nodes.get_mut(tag).unwrap();
-                let recurse =
-                    (self.f_propagate)(NodeAppArgs { node, perm: this.perms.entry(tag), rel_pos })
-                        .map_err(|error_kind| {
-                            (self.err_builder)(ErrHandlerArgs {
-                                error_kind,
-                                conflicting_info: &this.nodes.get(tag).unwrap().debug_info,
-                                accessed_info: &this
-                                    .nodes
-                                    .get(self.accessed_tag)
-                                    .unwrap()
-                                    .debug_info,
-                            })
-                        })?;
-                let node = this.nodes.get(tag).unwrap();
-                // 2. add the children to the stack for future traversal
-                if matches!(recurse, ContinueTraversal::Recurse) {
-                    let child_rel = rel_pos.for_child();
-                    for &child in node.children.iter() {
-                        // some child might be excluded from here and handled separately
-                        if Some(child) != exclude {
-                            self.stack.push((child, child_rel));
-                        }
-                    }
-                }
-                Ok(())
-            }
-        }
-
+    ) -> Result<(), OutErr> {
         let start_idx = self.tag_mapping.get(&start).unwrap();
-        let mut stack =
-            TreeVisitAux { accessed_tag: start_idx, f_propagate, err_builder, stack: Vec::new() };
-        {
-            let mut path_ascend = Vec::new();
-            // First climb to the root while recording the path
-            let mut curr = start_idx;
-            while let Some(ancestor) = self.nodes.get(curr).unwrap().parent {
-                path_ascend.push((ancestor, curr));
-                curr = ancestor;
-            }
-            // Then descend:
-            // - execute f_propagate on each node
-            // - record children in visit
-            while let Some((ancestor, next_in_path)) = path_ascend.pop() {
-                // Explore ancestors in descending order.
-                // `next_in_path` is excluded from the recursion because it
-                // will be the `ancestor` of the next iteration.
-                // It also needs a different `AccessRelatedness` than the other
-                // children of `ancestor`.
-                stack.exec_and_visit(
-                    &mut self,
-                    ancestor,
-                    Some(next_in_path),
-                    AccessRelatedness::StrictChildAccess,
-                )?;
-            }
-        };
-        // All (potentially zero) ancestors have been explored, call f_propagate on start
-        stack.exec_and_visit(&mut self, start_idx, None, AccessRelatedness::This)?;
-        // up to this point we have never popped from `stack`, hence if the
-        // path to the root is `root = p(n) <- p(n-1)... <- p(1) <- p(0) = start`
-        // then now `stack` contains
-        // `[<children(p(n)) except p(n-1)> ... <children(p(1)) except p(0)> <children(p(0))>]`,
-        // all of which are for now unexplored.
-        // This is the starting point of a standard DFS which will thus
-        // explore all non-ancestors of `start` in the following order:
-        // - all descendants of `start`;
-        // - then the unexplored descendants of `parent(start)`;
-        // ...
-        // - until finally the unexplored descendants of `root`.
-        while let Some((tag, rel_pos)) = stack.pop() {
-            stack.exec_and_visit(&mut self, tag, None, rel_pos)?;
-        }
-        Ok(())
+        let mut stack = TreeVisitorStack::new(start_idx, f_propagate, err_builder);
+        stack.push_and_visit_strict_ancestors(&mut self)?;
+        // All (potentially zero) ancestors have been explored,
+        // it's time to explore the `start` tag.
+        stack.exec_and_visit(
+            &mut self,
+            start_idx,
+            /* no children to exclude */ None,
+            AccessRelatedness::This,
+        )?;
+        // Then finish with a normal DFS.
+        stack.finish(&mut self)
+    }
+
+    // Applies `f_propagate` to every non-child vertex of the tree (ancestors first).
+    //
+    // `f_propagate` should follow the following format: for a given `Node` it updates its
+    // `Permission` depending on the position relative to `start` (given by an
+    // `AccessRelatedness`).
+    // It outputs whether the tree traversal for this subree should continue or not.
+    fn traverse_nonchildren<InnErr, OutErr>(
+        mut self,
+        start: BorTag,
+        f_propagate: impl Fn(NodeAppArgs<'_>) -> Result<ContinueTraversal, InnErr>,
+        err_builder: impl Fn(ErrHandlerArgs<'_, InnErr>) -> OutErr,
+    ) -> Result<(), OutErr> {
+        let start_idx = self.tag_mapping.get(&start).unwrap();
+        let mut stack = TreeVisitorStack::new(start_idx, f_propagate, err_builder);
+        stack.push_and_visit_strict_ancestors(&mut self)?;
+        // We *don't* visit the `start` tag, and we don't push its children.
+        // Only finish the DFS with the cousins.
+        stack.finish(&mut self)
     }
 }
 
@@ -453,7 +522,7 @@ impl<'tcx> Tree {
         self.perform_access(
             AccessKind::Write,
             tag,
-            access_range,
+            Some(access_range),
             global,
             span,
             diagnostics::AccessCause::Dealloc,
@@ -491,6 +560,11 @@ impl<'tcx> Tree {
     /// Map the per-node and per-location `LocationState::perform_access`
     /// to each location of `access_range`, on every tag of the allocation.
     ///
+    /// If `access_range` is `None`, this is interpreted as the special
+    /// access that is applied on protector release:
+    /// - the access will be applied only to initialized locations of the allocation,
+    /// - and it will not be visible to children.
+    ///
     /// `LocationState::perform_access` will take care of raising transition
     /// errors and updating the `initialized` status of each location,
     /// this traversal adds to that:
@@ -501,56 +575,105 @@ impl<'tcx> Tree {
         &mut self,
         access_kind: AccessKind,
         tag: BorTag,
-        access_range: AllocRange,
+        access_range: Option<AllocRange>,
         global: &GlobalState,
         span: Span,                             // diagnostics
         access_cause: diagnostics::AccessCause, // diagnostics
     ) -> InterpResult<'tcx> {
-        for (perms_range, perms) in self.rperms.iter_mut(access_range.start, access_range.size) {
-            TreeVisitor { nodes: &mut self.nodes, tag_mapping: &self.tag_mapping, perms }
-                .traverse_parents_this_children_others(
-                    tag,
-                    |args: NodeAppArgs<'_>| -> Result<ContinueTraversal, TransitionError> {
-                        let NodeAppArgs { node, mut perm, rel_pos } = args;
+        use std::ops::Range;
+        // Performs the per-node work:
+        // - insert the permission if it does not exist
+        // - perform the access
+        // - record the transition
+        // to which some optimizations are added:
+        // - skip the traversal of the children in some cases
+        // - do not record noop transitions
+        //
+        // `perms_range` is only for diagnostics (it is the range of
+        // the `RangeMap` on which we are currently working).
+        let node_app = |perms_range: Range<u64>,
+                        args: NodeAppArgs<'_>|
+         -> Result<ContinueTraversal, TransitionError> {
+            let NodeAppArgs { node, mut perm, rel_pos } = args;
 
-                        let old_state =
-                            perm.or_insert_with(|| LocationState::new(node.default_initial_perm));
+            let old_state = perm.or_insert(LocationState::new(node.default_initial_perm));
 
-                        match old_state.skip_if_known_noop(access_kind, rel_pos) {
-                            ContinueTraversal::SkipChildren =>
-                                return Ok(ContinueTraversal::SkipChildren),
-                            _ => {}
-                        }
+            match old_state.skip_if_known_noop(access_kind, rel_pos) {
+                ContinueTraversal::SkipChildren => return Ok(ContinueTraversal::SkipChildren),
+                _ => {}
+            }
 
-                        let protected = global.borrow().protected_tags.contains_key(&node.tag);
-                        let transition =
-                            old_state.perform_access(access_kind, rel_pos, protected)?;
+            let protected = global.borrow().protected_tags.contains_key(&node.tag);
+            let transition = old_state.perform_access(access_kind, rel_pos, protected)?;
 
-                        // Record the event as part of the history
-                        if !transition.is_noop() {
-                            node.debug_info.history.push(diagnostics::Event {
-                                transition,
-                                is_foreign: rel_pos.is_foreign(),
-                                access_cause,
-                                access_range,
-                                transition_range: perms_range.clone(),
-                                span,
-                            });
-                        }
-                        Ok(ContinueTraversal::Recurse)
-                    },
-                    |args: ErrHandlerArgs<'_, TransitionError>| -> InterpError<'tcx> {
-                        let ErrHandlerArgs { error_kind, conflicting_info, accessed_info } = args;
-                        TbError {
-                            conflicting_info,
-                            access_cause,
-                            error_offset: perms_range.start,
-                            error_kind,
-                            accessed_info,
-                        }
-                        .build()
-                    },
-                )?;
+            // Record the event as part of the history
+            if !transition.is_noop() {
+                node.debug_info.history.push(diagnostics::Event {
+                    transition,
+                    is_foreign: rel_pos.is_foreign(),
+                    access_cause,
+                    access_range,
+                    transition_range: perms_range.clone(),
+                    span,
+                });
+            }
+            Ok(ContinueTraversal::Recurse)
+        };
+
+        // Error handler in case `node_app` goes wrong.
+        // Wraps the faulty transition in more context for diagnostics.
+        let err_handler = |perms_range: Range<u64>,
+                           args: ErrHandlerArgs<'_, TransitionError>|
+         -> InterpError<'tcx> {
+            let ErrHandlerArgs { error_kind, conflicting_info, accessed_info } = args;
+            TbError {
+                conflicting_info,
+                access_cause,
+                error_offset: perms_range.start,
+                error_kind,
+                accessed_info,
+            }
+            .build()
+        };
+
+        if let Some(access_range) = access_range {
+            // Default branch: this is a "normal" access through a known range.
+            // We iterate over affected locations and traverse the tree for each of them.
+            for (perms_range, perms) in self.rperms.iter_mut(access_range.start, access_range.size)
+            {
+                TreeVisitor { nodes: &mut self.nodes, tag_mapping: &self.tag_mapping, perms }
+                    .traverse_parents_this_children_others(
+                        tag,
+                        |args| node_app(perms_range.clone(), args),
+                        |args| err_handler(perms_range.clone(), args),
+                    )?;
+            }
+        } else {
+            // This is a special access through the entire allocation.
+            // It actually only affects `initialized` locations, so we need
+            // to filter on those before initiating the traversal.
+            //
+            // In addition this implicit access should not be visible to children,
+            // thus the use of `traverse_nonchildren`.
+            // See the test case `returned_mut_is_usable` from
+            // `tests/pass/tree_borrows/tree-borrows.rs` for an example of
+            // why this is important.
+            for (perms_range, perms) in self.rperms.iter_mut_all() {
+                let idx = self.tag_mapping.get(&tag).unwrap();
+                // Only visit initialized permissions
+                if let Some(p) = perms.get(idx) && p.initialized {
+                    TreeVisitor {
+                        nodes: &mut self.nodes,
+                        tag_mapping: &self.tag_mapping,
+                        perms,
+                    }
+                    .traverse_nonchildren(
+                        tag,
+                        |args| node_app(perms_range.clone(), args),
+                        |args| err_handler(perms_range.clone(), args),
+                    )?;
+                }
+            }
         }
         Ok(())
     }
@@ -662,90 +785,6 @@ impl AccessRelatedness {
         match self {
             AncestorAccess | This => AncestorAccess,
             StrictChildAccess | DistantAccess => DistantAccess,
-        }
-    }
-}
-
-#[cfg(test)]
-mod commutation_tests {
-    use super::*;
-    impl LocationState {
-        pub fn all() -> impl Iterator<Item = Self> {
-            // We keep `latest_foreign_access` at `None` as that's just a cache.
-            Permission::all().flat_map(|permission| {
-                [false, true].into_iter().map(move |initialized| {
-                    Self { permission, initialized, latest_foreign_access: None }
-                })
-            })
-        }
-    }
-
-    #[test]
-    #[rustfmt::skip]
-    // Exhaustive check that for any starting configuration loc,
-    // for any two read accesses r1 and r2, if `loc + r1 + r2` is not UB
-    // and results in `loc'`, then `loc + r2 + r1` is also not UB and results
-    // in the same final state `loc'`.
-    // This lets us justify arbitrary read-read reorderings.
-    fn all_read_accesses_commute() {
-        let kind = AccessKind::Read;
-        // Two of the four combinations of `AccessRelatedness` are trivial,
-        // but we might as well check them all.
-        for rel1 in AccessRelatedness::all() {
-            for rel2 in AccessRelatedness::all() {
-                // Any protector state works, but we can't move reads across function boundaries
-                // so the two read accesses occur under the same protector.
-                for &protected in &[true, false] {
-                    for loc in LocationState::all() {
-                        // Apply 1 then 2. Failure here means that there is UB in the source
-                        // and we skip the check in the target.
-                        let mut loc12 = loc;
-                        let Ok(_) = loc12.perform_access(kind, rel1, protected) else { continue };
-                        let Ok(_) = loc12.perform_access(kind, rel2, protected) else { continue };
-
-                        // If 1 followed by 2 succeeded, then 2 followed by 1 must also succeed...
-                        let mut loc21 = loc;
-                        loc21.perform_access(kind, rel2, protected).unwrap();
-                        loc21.perform_access(kind, rel1, protected).unwrap();
-
-                        // ... and produce the same final result.
-                        assert_eq!(
-                            loc12, loc21,
-                            "Read accesses {:?} followed by {:?} do not commute !",
-                            rel1, rel2
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[rustfmt::skip]
-    // Ensure that of 2 accesses happen, one foreign and one a child, and we are protected, that we
-    // get UB unless they are both reads.
-    fn protected_enforces_noalias() {
-        for rel1 in AccessRelatedness::all() {
-            for rel2 in AccessRelatedness::all() {
-                if rel1.is_foreign() == rel2.is_foreign() {
-                    // We want to check pairs of accesses where one is foreign and one is not.
-                    continue;
-                }
-                for kind1 in AccessKind::all() {
-                    for kind2 in AccessKind::all() {
-                        for mut state in LocationState::all() {
-                            let protected = true;
-                            let Ok(_) = state.perform_access(kind1, rel1, protected) else { continue };
-                            let Ok(_) = state.perform_access(kind2, rel2, protected) else { continue };
-                            // If these were both allowed, it must have been two reads.
-                            assert!(
-                                kind1 == AccessKind::Read && kind2 == AccessKind::Read,
-                                "failed to enforce noalias between two accesses that are not both reads"
-                            );
-                        }
-                    }
-                }
-            }
         }
     }
 }

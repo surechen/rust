@@ -108,10 +108,6 @@ pub struct CreateTempDir {
 }
 
 #[derive(Diagnostic)]
-#[diag(codegen_ssa_incompatible_linking_modifiers)]
-pub struct IncompatibleLinkingModifiers;
-
-#[derive(Diagnostic)]
 #[diag(codegen_ssa_add_native_library)]
 pub struct AddNativeLibrary {
     pub library_path: PathBuf,
@@ -492,10 +488,6 @@ pub struct UnableToWriteDebuggerVisualizer {
 pub struct RlibArchiveBuildFailure {
     pub error: Error,
 }
-
-#[derive(Diagnostic)]
-#[diag(codegen_ssa_option_gcc_only)]
-pub struct OptionGccOnly;
 
 #[derive(Diagnostic)]
 pub enum ExtractBundledLibsError<'a> {

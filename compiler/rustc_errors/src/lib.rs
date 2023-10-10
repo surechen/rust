@@ -519,7 +519,7 @@ pub struct HandlerFlags {
     /// If false, warning-level lints are suppressed.
     /// (rustc: see `--allow warnings` and `--cap-lints`)
     pub can_emit_warnings: bool,
-    /// If true, error-level diagnostics are upgraded to bug-level.
+    /// If Some, the Nth error-level diagnostic is upgraded to bug-level.
     /// (rustc: see `-Z treat-err-as-bug`)
     pub treat_err_as_bug: Option<NonZeroUsize>,
     /// If true, immediately emit diagnostics that would otherwise be buffered.
@@ -1376,16 +1376,16 @@ impl HandlerInner {
                 self.emitted_diagnostic_codes.insert(code.clone());
             }
 
-            let already_emitted = |this: &mut Self| {
+            let already_emitted = {
                 let mut hasher = StableHasher::new();
                 diagnostic.hash(&mut hasher);
                 let diagnostic_hash = hasher.finish();
-                !this.emitted_diagnostics.insert(diagnostic_hash)
+                !self.emitted_diagnostics.insert(diagnostic_hash)
             };
 
             // Only emit the diagnostic if we've been asked to deduplicate or
             // haven't already emitted an equivalent diagnostic.
-            if !(self.flags.deduplicate_diagnostics && already_emitted(self)) {
+            if !(self.flags.deduplicate_diagnostics && already_emitted) {
                 debug!(?diagnostic);
                 debug!(?self.emitted_diagnostics);
                 let already_emitted_sub = |sub: &mut SubDiagnostic| {
@@ -1401,6 +1401,11 @@ impl HandlerInner {
                 };
 
                 diagnostic.children.extract_if(already_emitted_sub).for_each(|_| {});
+                if already_emitted {
+                    diagnostic.note(
+                        "duplicate diagnostic emitted due to `-Z deduplicate-diagnostics=no`",
+                    );
+                }
 
                 self.emitter.emit_diagnostic(diagnostic);
                 if diagnostic.is_error() {
@@ -1719,19 +1724,17 @@ impl HandlerInner {
             match (
                 self.err_count() + self.lint_err_count,
                 self.delayed_bug_count(),
-                self.flags.treat_err_as_bug.map(|c| c.get()).unwrap_or(0),
+                self.flags.treat_err_as_bug.map(|c| c.get()).unwrap(),
             ) {
                 (1, 0, 1) => panic!("aborting due to `-Z treat-err-as-bug=1`"),
                 (0, 1, 1) => panic!("aborting due delayed bug with `-Z treat-err-as-bug=1`"),
-                (count, delayed_count, as_bug) => {
+                (count, delayed_count, val) => {
                     if delayed_count > 0 {
                         panic!(
-                            "aborting after {count} errors and {delayed_count} delayed bugs due to `-Z treat-err-as-bug={as_bug}`",
+                            "aborting after {count} errors and {delayed_count} delayed bugs due to `-Z treat-err-as-bug={val}`",
                         )
                     } else {
-                        panic!(
-                            "aborting after {count} errors due to `-Z treat-err-as-bug={as_bug}`",
-                        )
+                        panic!("aborting after {count} errors due to `-Z treat-err-as-bug={val}`")
                     }
                 }
             }

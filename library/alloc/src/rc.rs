@@ -1649,7 +1649,7 @@ impl<T: ?Sized, A: Allocator> Rc<T, A> {
     /// assert!(!Rc::ptr_eq(&five, &other_five));
     /// ```
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        this.ptr.as_ptr() as *const () == other.ptr.as_ptr() as *const ()
+        ptr::addr_eq(this.ptr.as_ptr(), other.ptr.as_ptr())
     }
 }
 
@@ -2409,6 +2409,27 @@ impl<T> From<T> for Rc<T> {
 }
 
 #[cfg(not(no_global_oom_handling))]
+#[stable(feature = "shared_from_array", since = "CURRENT_RUSTC_VERSION")]
+impl<T, const N: usize> From<[T; N]> for Rc<[T]> {
+    /// Converts a [`[T; N]`](prim@array) into an `Rc<[T]>`.
+    ///
+    /// The conversion moves the array into a newly allocated `Rc`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use std::rc::Rc;
+    /// let original: [i32; 3] = [1, 2, 3];
+    /// let shared: Rc<[i32]> = Rc::from(original);
+    /// assert_eq!(&[1, 2, 3], &shared[..]);
+    /// ```
+    #[inline]
+    fn from(v: [T; N]) -> Rc<[T]> {
+        Rc::<[T; N]>::from(v)
+    }
+}
+
+#[cfg(not(no_global_oom_handling))]
 #[stable(feature = "shared_from_slice", since = "1.21.0")]
 impl<T: Clone> From<&[T]> for Rc<[T]> {
     /// Allocate a reference-counted slice and fill it by cloning `v`'s items.
@@ -2680,6 +2701,7 @@ impl<T, I: iter::TrustedLen<Item = T>> ToRcSlice<T> for I {
 ///
 /// [`upgrade`]: Weak::upgrade
 #[stable(feature = "rc_weak", since = "1.4.0")]
+#[cfg_attr(not(test), rustc_diagnostic_item = "RcWeak")]
 pub struct Weak<
     T: ?Sized,
     #[unstable(feature = "allocator_api", issue = "32838")] A: Allocator = Global,
@@ -3125,7 +3147,7 @@ impl<T: ?Sized, A: Allocator> Weak<T, A> {
     #[must_use]
     #[stable(feature = "weak_ptr_eq", since = "1.39.0")]
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        ptr::eq(self.ptr.as_ptr() as *const (), other.ptr.as_ptr() as *const ())
+        ptr::addr_eq(self.ptr.as_ptr(), other.ptr.as_ptr())
     }
 }
 

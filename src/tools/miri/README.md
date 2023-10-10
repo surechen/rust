@@ -362,7 +362,7 @@ Some of these are **unsound**, which means they can lead
 to Miri failing to detect cases of undefined behavior in a program.
 
 * `-Zmiri-disable-abi-check` disables checking [function ABI]. Using this flag
-  is **unsound**.
+  is **unsound**. This flag is **deprecated**.
 * `-Zmiri-disable-alignment-check` disables checking pointer alignment, so you
   can focus on other failures, but it means Miri can miss bugs in your program.
   Using this flag is **unsound**.
@@ -478,8 +478,12 @@ Moreover, Miri recognizes some environment variables:
 * `MIRI_TEST_TARGET` (recognized by the test suite and the `./miri` script) indicates which target
   architecture to test against.  `miri` and `cargo miri` accept the `--target` flag for the same
   purpose.
-* `MIRI_NO_STD` (recognized by `cargo miri` and the test suite) makes sure that the target's
-  sysroot is built without libstd. This allows testing and running no_std programs.
+* `MIRI_TEST_THREADS` (recognized by the test suite): set the number of threads to use for running tests.
+  By default the number of cores is used.
+* `MIRI_NO_STD` (recognized by `cargo miri`) makes sure that the target's sysroot is built without
+  libstd. This allows testing and running no_std programs.
+  (Miri has a heuristic to detect no-std targets based on the target name; this environment variable
+  is only needed when that heuristic fails.)
 * `RUSTC_BLESS` (recognized by the test suite and `cargo-miri-test/run-test.py`): overwrite all
   `stderr` and `stdout` files instead of checking whether the output matches.
 * `MIRI_SKIP_UI_CHECKS` (recognized by the test suite): don't check whether the

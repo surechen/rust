@@ -151,6 +151,7 @@ The minimum rust version that the project supports
 * [`type_repetition_in_bounds`](https://rust-lang.github.io/rust-clippy/master/index.html#type_repetition_in_bounds)
 * [`tuple_array_conversions`](https://rust-lang.github.io/rust-clippy/master/index.html#tuple_array_conversions)
 * [`manual_try_fold`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_try_fold)
+* [`manual_hash_one`](https://rust-lang.github.io/rust-clippy/master/index.html#manual_hash_one)
 
 
 ## `cognitive-complexity-threshold`
@@ -703,7 +704,7 @@ Minimum chars an ident can have, anything below or equal to this will be linted.
 ## `accept-comment-above-statement`
 Whether to accept a safety comment to be placed above the statement containing the `unsafe` block
 
-**Default Value:** `false` (`bool`)
+**Default Value:** `true` (`bool`)
 
 ---
 **Affected lints:**
@@ -713,7 +714,7 @@ Whether to accept a safety comment to be placed above the statement containing t
 ## `accept-comment-above-attributes`
 Whether to accept a safety comment to be placed above the attributes for the `unsafe` block
 
-**Default Value:** `false` (`bool`)
+**Default Value:** `true` (`bool`)
 
 ---
 **Affected lints:**
@@ -749,6 +750,16 @@ Which crates to allow absolute paths from
 ---
 **Affected lints:**
 * [`absolute_paths`](https://rust-lang.github.io/rust-clippy/master/index.html#absolute_paths)
+
+
+## `allowed-dotfiles`
+Additional dotfiles (files or directories starting with a dot) to allow
+
+**Default Value:** `{}` (`rustc_data_structures::fx::FxHashSet<String>`)
+
+---
+**Affected lints:**
+* [`path_ends_with_ext`](https://rust-lang.github.io/rust-clippy/master/index.html#path_ends_with_ext)
 
 
 ## `enforce-iter-loop-reborrow`

@@ -100,8 +100,7 @@ pub(crate) fn eval_nullary_intrinsic<'tcx>(
             | ty::Dynamic(_, _, _)
             | ty::Closure(_, _)
             | ty::Generator(_, _, _)
-            | ty::GeneratorWitness(_)
-            | ty::GeneratorWitnessMIR(_, _)
+            | ty::GeneratorWitness(..)
             | ty::Never
             | ty::Tuple(_)
             | ty::Error(_) => ConstValue::from_target_usize(0u64, &tcx),
@@ -165,7 +164,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                     sym::type_name => Ty::new_static_str(self.tcx.tcx),
                     _ => bug!(),
                 };
-                let val = self.ctfe_query(None, |tcx| {
+                let val = self.ctfe_query(|tcx| {
                     tcx.const_eval_global_id(self.param_env, gid, Some(tcx.span))
                 })?;
                 let val = self.const_val_to_op(val, ty, Some(dest.layout))?;
@@ -307,7 +306,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 let dist = {
                     // Addresses are unsigned, so this is a `usize` computation. We have to do the
                     // overflow check separately anyway.
-                    let (val, overflowed, _ty) = {
+                    let (val, overflowed) = {
                         let a_offset = ImmTy::from_uint(a_offset, usize_layout);
                         let b_offset = ImmTy::from_uint(b_offset, usize_layout);
                         self.overflowing_binary_op(BinOp::Sub, &a_offset, &b_offset)?
@@ -324,7 +323,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         // The signed form of the intrinsic allows this. If we interpret the
                         // difference as isize, we'll get the proper signed difference. If that
                         // seems *positive*, they were more than isize::MAX apart.
-                        let dist = val.to_target_isize(self)?;
+                        let dist = val.to_scalar().to_target_isize(self)?;
                         if dist >= 0 {
                             throw_ub_custom!(
                                 fluent::const_eval_offset_from_underflow,
@@ -334,7 +333,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                         dist
                     } else {
                         // b >= a
-                        let dist = val.to_target_isize(self)?;
+                        let dist = val.to_scalar().to_target_isize(self)?;
                         // If converting to isize produced a *negative* result, we had an overflow
                         // because they were more than isize::MAX apart.
                         if dist < 0 {
@@ -504,9 +503,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         // Performs an exact division, resulting in undefined behavior where
         // `x % y != 0` or `y == 0` or `x == T::MIN && y == -1`.
         // First, check x % y != 0 (or if that computation overflows).
-        let (res, overflow, _ty) = self.overflowing_binary_op(BinOp::Rem, &a, &b)?;
+        let (res, overflow) = self.overflowing_binary_op(BinOp::Rem, &a, &b)?;
         assert!(!overflow); // All overflow is UB, so this should never return on overflow.
-        if res.assert_bits(a.layout.size) != 0 {
+        if res.to_scalar().assert_bits(a.layout.size) != 0 {
             throw_ub_custom!(
                 fluent::const_eval_exact_div_has_remainder,
                 a = format!("{a}"),
@@ -524,7 +523,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
         r: &ImmTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, Scalar<M::Provenance>> {
         assert!(matches!(mir_op, BinOp::Add | BinOp::Sub));
-        let (val, overflowed, _ty) = self.overflowing_binary_op(mir_op, l, r)?;
+        let (val, overflowed) = self.overflowing_binary_op(mir_op, l, r)?;
         Ok(if overflowed {
             let size = l.layout.size;
             let num_bits = size.bits();
@@ -556,7 +555,7 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
                 }
             }
         } else {
-            val
+            val.to_scalar()
         })
     }
 

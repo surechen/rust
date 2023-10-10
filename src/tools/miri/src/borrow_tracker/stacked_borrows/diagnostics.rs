@@ -1,6 +1,7 @@
 use smallvec::SmallVec;
 use std::fmt;
 
+use rustc_data_structures::fx::FxHashSet;
 use rustc_middle::mir::interpret::{alloc_range, AllocId, AllocRange, InterpError};
 use rustc_span::{Span, SpanData};
 use rustc_target::abi::Size;
@@ -233,6 +234,12 @@ impl AllocHistory {
             protectors: SmallVec::new(),
         }
     }
+
+    pub fn retain(&mut self, live_tags: &FxHashSet<BorTag>) {
+        self.invalidations.retain(|event| live_tags.contains(&event.tag));
+        self.creations.retain(|event| live_tags.contains(&event.retag.new_tag));
+        self.protectors.retain(|event| live_tags.contains(&event.tag));
+    }
 }
 
 impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
@@ -429,6 +436,7 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
             ProtectorKind::WeakProtector => "weakly protected",
             ProtectorKind::StrongProtector => "strongly protected",
         };
+        let item_tag = item.tag();
         let call_id = self
             .machine
             .threads
@@ -437,7 +445,7 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
             .map(|frame| {
                 frame.extra.borrow_tracker.as_ref().expect("we should have borrow tracking data")
             })
-            .find(|frame| frame.protected_tags.contains(&item.tag()))
+            .find(|frame| frame.protected_tags.iter().any(|(_, tag)| tag == &item_tag))
             .map(|frame| frame.call_id)
             .unwrap(); // FIXME: Surely we should find something, but a panic seems wrong here?
         match self.operation {

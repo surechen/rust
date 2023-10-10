@@ -1005,13 +1005,13 @@ enum TestKind<'tcx> {
         ///
         /// For `bool` we always generate two edges, one for `true` and one for
         /// `false`.
-        options: FxIndexMap<ConstantKind<'tcx>, u128>,
+        options: FxIndexMap<Const<'tcx>, u128>,
     },
 
     /// Test for equality with value, possibly after an unsizing coercion to
     /// `ty`,
     Eq {
-        value: ConstantKind<'tcx>,
+        value: Const<'tcx>,
         // Integer types are handled by `SwitchInt`, and constants with ADT
         // types are converted back into patterns, so this can only be `&str`,
         // `&[T]`, `f32` or `f64`.
@@ -1622,9 +1622,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
         // may want to add cases based on the candidates that are
         // available
         match test.kind {
-            TestKind::SwitchInt { switch_ty, ref mut options } => {
+            TestKind::SwitchInt { switch_ty: _, ref mut options } => {
                 for candidate in candidates.iter() {
-                    if !self.add_cases_to_switch(&match_place, candidate, switch_ty, options) {
+                    if !self.add_cases_to_switch(&match_place, candidate, options) {
                         break;
                     }
                 }
@@ -1798,7 +1798,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 let fake_borrow_ty =
                     Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, fake_borrow_deref_ty);
                 let mut fake_borrow_temp = LocalDecl::new(fake_borrow_ty, temp_span);
-                fake_borrow_temp.internal = self.local_decls[matched_place.local].internal;
                 fake_borrow_temp.local_info = ClearCrossCrate::Set(Box::new(LocalInfo::FakeBorrow));
                 let fake_borrow_temp = self.local_decls.push(fake_borrow_temp);
 
@@ -2268,7 +2267,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ty: var_ty,
             user_ty: if user_ty.is_empty() { None } else { Some(Box::new(user_ty)) },
             source_info,
-            internal: false,
             local_info: ClearCrossCrate::Set(Box::new(LocalInfo::User(BindingForm::Var(
                 VarBindingForm {
                     binding_mode,
@@ -2298,7 +2296,6 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                 ty: Ty::new_imm_ref(tcx, tcx.lifetimes.re_erased, var_ty),
                 user_ty: None,
                 source_info,
-                internal: false,
                 local_info: ClearCrossCrate::Set(Box::new(LocalInfo::User(
                     BindingForm::RefForGuard,
                 ))),

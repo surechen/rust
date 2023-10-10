@@ -31,7 +31,7 @@ use rustc_resolve::rustdoc::{
 use rustc_session::Session;
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{self, FileName, Loc};
+use rustc_span::{self, FileName, Loc, DUMMY_SP};
 use rustc_target::abi::VariantIdx;
 use rustc_target::spec::abi::Abi;
 
@@ -622,7 +622,7 @@ impl Item {
         fn build_fn_header(
             def_id: DefId,
             tcx: TyCtxt<'_>,
-            asyncness: hir::IsAsync,
+            asyncness: ty::Asyncness,
         ) -> hir::FnHeader {
             let sig = tcx.fn_sig(def_id).skip_binder();
             let constness =
@@ -631,6 +631,10 @@ impl Item {
                 } else {
                     hir::Constness::NotConst
                 };
+            let asyncness = match asyncness {
+                ty::Asyncness::Yes => hir::IsAsync::Async(DUMMY_SP),
+                ty::Asyncness::No => hir::IsAsync::NotAsync,
+            };
             hir::FnHeader { unsafety: sig.unsafety(), abi: sig.abi(), constness, asyncness }
         }
         let header = match *self.kind {
@@ -1285,7 +1289,7 @@ impl Lifetime {
 pub(crate) enum WherePredicate {
     BoundPredicate { ty: Type, bounds: Vec<GenericBound>, bound_params: Vec<GenericParamDef> },
     RegionPredicate { lifetime: Lifetime, bounds: Vec<GenericBound> },
-    EqPredicate { lhs: Box<Type>, rhs: Box<Term>, bound_params: Vec<GenericParamDef> },
+    EqPredicate { lhs: Type, rhs: Term },
 }
 
 impl WherePredicate {
@@ -1293,15 +1297,6 @@ impl WherePredicate {
         match *self {
             WherePredicate::BoundPredicate { ref bounds, .. } => Some(bounds),
             WherePredicate::RegionPredicate { ref bounds, .. } => Some(bounds),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn get_bound_params(&self) -> Option<&[GenericParamDef]> {
-        match self {
-            Self::BoundPredicate { bound_params, .. } | Self::EqPredicate { bound_params, .. } => {
-                Some(bound_params)
-            }
             _ => None,
         }
     }
@@ -1379,28 +1374,6 @@ pub(crate) struct FnDecl {
 impl FnDecl {
     pub(crate) fn self_type(&self) -> Option<SelfTy> {
         self.inputs.values.get(0).and_then(|v| v.to_self())
-    }
-
-    /// Returns the sugared return type for an async function.
-    ///
-    /// For example, if the return type is `impl std::future::Future<Output = i32>`, this function
-    /// will return `i32`.
-    ///
-    /// # Panics
-    ///
-    /// This function will panic if the return type does not match the expected sugaring for async
-    /// functions.
-    pub(crate) fn sugared_async_return_type(&self) -> Type {
-        if let Type::ImplTrait(v) = &self.output &&
-            let [GenericBound::TraitBound(PolyTrait { trait_, .. }, _ )] = &v[..]
-        {
-            let bindings = trait_.bindings().unwrap();
-            let ret_ty = bindings[0].term();
-            let ty = ret_ty.ty().expect("Unexpected constant return term");
-            ty.clone()
-        } else {
-            panic!("unexpected desugaring of async function")
-        }
     }
 }
 
@@ -1610,6 +1583,30 @@ impl Type {
             RawPointer(..) => Some(PrimitiveType::RawPointer),
             BareFunction(..) => Some(PrimitiveType::Fn),
             _ => None,
+        }
+    }
+
+    /// Returns the sugared return type for an async function.
+    ///
+    /// For example, if the return type is `impl std::future::Future<Output = i32>`, this function
+    /// will return `i32`.
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the return type does not match the expected sugaring for async
+    /// functions.
+    pub(crate) fn sugared_async_return_type(self) -> Type {
+        if let Type::ImplTrait(mut v) = self
+            && let Some(GenericBound::TraitBound(PolyTrait { mut trait_, .. }, _ )) = v.pop()
+            && let Some(segment) = trait_.segments.pop()
+            && let GenericArgs::AngleBracketed { mut bindings, .. } = segment.args
+            && let Some(binding) = bindings.pop()
+            && let TypeBindingKind::Equality { term } = binding.kind
+            && let Term::Type(ty) = term
+        {
+            ty
+        } else {
+            panic!("unexpected async fn return type")
         }
     }
 
@@ -2087,9 +2084,8 @@ impl Discriminant {
     pub(crate) fn expr(&self, tcx: TyCtxt<'_>) -> Option<String> {
         self.expr.map(|body| rendered_const(tcx, body))
     }
-    /// Will always be a machine readable number, without underscores or suffixes.
-    pub(crate) fn value(&self, tcx: TyCtxt<'_>) -> String {
-        print_evaluated_const(tcx, self.value, false).unwrap()
+    pub(crate) fn value(&self, tcx: TyCtxt<'_>, with_underscores: bool) -> String {
+        print_evaluated_const(tcx, self.value, with_underscores, false).unwrap()
     }
 }
 
@@ -2180,16 +2176,6 @@ impl Path {
                         })
                         .collect(),
                 )
-            } else {
-                None
-            }
-        })
-    }
-
-    pub(crate) fn bindings(&self) -> Option<&[TypeBinding]> {
-        self.segments.last().and_then(|seg| {
-            if let GenericArgs::AngleBracketed { ref bindings, .. } = seg.args {
-                Some(&**bindings)
             } else {
                 None
             }
@@ -2344,7 +2330,7 @@ impl ConstantKind {
         match *self {
             ConstantKind::TyConst { .. } | ConstantKind::Anonymous { .. } => None,
             ConstantKind::Extern { def_id } | ConstantKind::Local { def_id, .. } => {
-                print_evaluated_const(tcx, def_id, true)
+                print_evaluated_const(tcx, def_id, true, true)
             }
         }
     }
@@ -2472,15 +2458,6 @@ pub(crate) struct TypeBinding {
 pub(crate) enum TypeBindingKind {
     Equality { term: Term },
     Constraint { bounds: Vec<GenericBound> },
-}
-
-impl TypeBinding {
-    pub(crate) fn term(&self) -> &Term {
-        match self.kind {
-            TypeBindingKind::Equality { ref term } => term,
-            _ => panic!("expected equality type binding for parenthesized generic args"),
-        }
-    }
 }
 
 /// The type, lifetime, or constant that a private type alias's parameter should be

@@ -196,9 +196,7 @@ impl<'hir> Map<'hir> {
                 ItemKind::Macro(_, macro_kind) => DefKind::Macro(macro_kind),
                 ItemKind::Mod(..) => DefKind::Mod,
                 ItemKind::OpaqueTy(..) => DefKind::OpaqueTy,
-                ItemKind::TyAlias(..) => {
-                    DefKind::TyAlias { lazy: self.tcx.features().lazy_type_alias }
-                }
+                ItemKind::TyAlias(..) => DefKind::TyAlias,
                 ItemKind::Enum(..) => DefKind::Enum,
                 ItemKind::Struct(..) => DefKind::Struct,
                 ItemKind::Union(..) => DefKind::Union,
@@ -442,9 +440,10 @@ impl<'hir> Map<'hir> {
     /// Panics if `LocalDefId` does not have an associated body.
     pub fn body_owner_kind(self, def_id: LocalDefId) -> BodyOwnerKind {
         match self.tcx.def_kind(def_id) {
-            DefKind::Const | DefKind::AssocConst | DefKind::InlineConst | DefKind::AnonConst => {
-                BodyOwnerKind::Const
+            DefKind::Const | DefKind::AssocConst | DefKind::AnonConst => {
+                BodyOwnerKind::Const { inline: false }
             }
+            DefKind::InlineConst => BodyOwnerKind::Const { inline: true },
             DefKind::Ctor(..) | DefKind::Fn | DefKind::AssocFn => BodyOwnerKind::Fn,
             DefKind::Closure | DefKind::Generator => BodyOwnerKind::Closure,
             DefKind::Static(mt) => BodyOwnerKind::Static(mt),
@@ -461,7 +460,7 @@ impl<'hir> Map<'hir> {
     /// just that it has to be checked as if it were.
     pub fn body_const_context(self, def_id: LocalDefId) -> Option<ConstContext> {
         let ccx = match self.body_owner_kind(def_id) {
-            BodyOwnerKind::Const => ConstContext::Const,
+            BodyOwnerKind::Const { inline } => ConstContext::Const { inline },
             BodyOwnerKind::Static(mt) => ConstContext::Static(mt),
 
             BodyOwnerKind::Fn if self.tcx.is_constructor(def_id.to_def_id()) => return None,
@@ -971,12 +970,15 @@ impl<'hir> Map<'hir> {
                 // SyntaxContext of the visibility.
                 sig.span.find_ancestor_in_same_ctxt(*outer_span).unwrap_or(*outer_span)
             }
+            // Impls, including their where clauses.
+            Node::Item(Item {
+                kind: ItemKind::Impl(Impl { generics, .. }),
+                span: outer_span,
+                ..
+            }) => until_within(*outer_span, generics.where_clause_span),
             // Constants and Statics.
             Node::Item(Item {
-                kind:
-                    ItemKind::Const(ty, ..)
-                    | ItemKind::Static(ty, ..)
-                    | ItemKind::Impl(Impl { self_ty: ty, .. }),
+                kind: ItemKind::Const(ty, ..) | ItemKind::Static(ty, ..),
                 span: outer_span,
                 ..
             })

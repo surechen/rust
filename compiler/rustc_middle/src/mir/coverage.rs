@@ -18,11 +18,6 @@ rustc_index::newtype_index! {
 
 impl CounterId {
     pub const START: Self = Self::from_u32(0);
-
-    #[inline(always)]
-    pub fn next_id(self) -> Self {
-        Self::from_u32(self.as_u32() + 1)
-    }
 }
 
 rustc_index::newtype_index! {
@@ -38,21 +33,6 @@ rustc_index::newtype_index! {
 
 impl ExpressionId {
     pub const START: Self = Self::from_u32(0);
-
-    #[inline(always)]
-    pub fn next_id(self) -> Self {
-        Self::from_u32(self.as_u32() + 1)
-    }
-}
-
-rustc_index::newtype_index! {
-    /// MappedExpressionIndex values ascend from zero, and are recalculated indexes based on their
-    /// array position in the LLVM coverage map "Expressions" array, which is assembled during the
-    /// "mapgen" process. They cannot be computed algorithmically, from the other `newtype_index`s.
-    #[derive(HashStable)]
-    #[max = 0xFFFF_FFFF]
-    #[debug_format = "MappedExpressionIndex({})"]
-    pub struct MappedExpressionIndex {}
 }
 
 /// Operand of a coverage-counter expression.

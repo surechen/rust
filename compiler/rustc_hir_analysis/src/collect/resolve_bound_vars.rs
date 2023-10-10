@@ -859,22 +859,6 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
         let scope = Scope::TraitRefBoundary { s: self.scope };
         self.with(scope, |this| {
             walk_list!(this, visit_generic_param, generics.params);
-            for param in generics.params {
-                match param.kind {
-                    GenericParamKind::Lifetime { .. } => {}
-                    GenericParamKind::Type { default, .. } => {
-                        if let Some(ty) = default {
-                            this.visit_ty(ty);
-                        }
-                    }
-                    GenericParamKind::Const { ty, default } => {
-                        this.visit_ty(ty);
-                        if let Some(default) = default {
-                            this.visit_body(this.tcx.hir().body(default.body));
-                        }
-                    }
-                }
-            }
             walk_list!(this, visit_where_predicate, generics.predicates);
         })
     }
@@ -996,7 +980,7 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
 
     fn visit_generic_param(&mut self, p: &'tcx GenericParam<'tcx>) {
         match p.kind {
-            GenericParamKind::Const { ty, default: Some(default) } => {
+            GenericParamKind::Const { ty: _, default: Some(default) } => {
                 self.resolve_type_ref(p.def_id, p.hir_id);
 
                 // For expr in default of Const expr in where predict.
@@ -1022,6 +1006,21 @@ impl<'a, 'tcx> Visitor<'tcx> for BoundVarContext<'a, 'tcx> {
             GenericParamKind::Lifetime { .. } => {
                 // No need to resolve lifetime params, we don't use them for things
                 // like implicit `?Sized` or const-param-has-ty predicates.
+            }
+        }
+
+        match p.kind {
+            GenericParamKind::Lifetime { .. } => {}
+            GenericParamKind::Type { default, .. } => {
+                if let Some(ty) = default {
+                    self.visit_ty(ty);
+                }
+            }
+            GenericParamKind::Const { ty, default } => {
+                self.visit_ty(ty);
+                if let Some(default) = default {
+                    self.visit_body(self.tcx.hir().body(default.body));
+                }
             }
         }
     }
@@ -1239,7 +1238,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
                         && let Some(generics) = self.tcx.hir().get_generics(self.tcx.local_parent(param_id))
                         && let Some(param) = generics.params.iter().find(|p| p.def_id == param_id)
                         && param.is_elided_lifetime()
-                        && let hir::IsAsync::NotAsync = self.tcx.asyncness(lifetime_ref.hir_id.owner.def_id)
+                        && !self.tcx.asyncness(lifetime_ref.hir_id.owner.def_id).is_async()
                         && !self.tcx.features().anonymous_lifetime_in_impl_trait
                     {
                         let mut diag =  rustc_session::parse::feature_err(
@@ -1545,7 +1544,7 @@ impl<'a, 'tcx> BoundVarContext<'a, 'tcx> {
                 DefKind::Struct
                 | DefKind::Union
                 | DefKind::Enum
-                | DefKind::TyAlias { .. }
+                | DefKind::TyAlias
                 | DefKind::Trait,
                 def_id,
             ) if depth == 0 => Some(def_id),
@@ -2055,7 +2054,7 @@ fn is_late_bound_map(
 
                 hir::TyKind::Path(hir::QPath::Resolved(
                     None,
-                    hir::Path { res: Res::Def(DefKind::TyAlias { .. }, alias_def), segments, span },
+                    hir::Path { res: Res::Def(DefKind::TyAlias, alias_def), segments, span },
                 )) => {
                     // See comments on `ConstrainedCollectorPostAstConv` for why this arm does not just consider
                     // args to be unconstrained.

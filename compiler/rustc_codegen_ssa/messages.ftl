@@ -46,8 +46,6 @@ codegen_ssa_ignoring_output = ignoring -o because multiple .{$extension} files w
 codegen_ssa_illegal_link_ordinal_format = illegal ordinal format in `link_ordinal`
     .note = an unsuffixed integer value, e.g., `1`, is expected
 
-codegen_ssa_incompatible_linking_modifiers = link modifiers combination `+bundle,+whole-archive` is unstable when generating rlibs
-
 codegen_ssa_insufficient_vs_code_product = VS Code is a different product, and is not sufficient.
 
 codegen_ssa_invalid_link_ordinal_nargs = incorrect number of arguments to `#[link_ordinal]`
@@ -169,8 +167,6 @@ codegen_ssa_multiple_main_functions = entry symbol `main` declared multiple time
     .help = did you use `#[no_mangle]` on `fn main`? Use `#[start]` instead
 
 codegen_ssa_no_natvis_directory = error enumerating natvis directory: {$error}
-
-codegen_ssa_option_gcc_only = option `-Z gcc-ld` is used even though linker flavor is not gcc
 
 codegen_ssa_processing_dymutil_failed = processing debug info with `dsymutil` failed: {$status}
     .note = {$output}

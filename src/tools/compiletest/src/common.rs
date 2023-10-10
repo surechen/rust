@@ -141,6 +141,22 @@ impl PanicStrategy {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Sanitizer {
+    Address,
+    Cfi,
+    Kcfi,
+    KernelAddress,
+    Leak,
+    Memory,
+    Memtag,
+    Safestack,
+    ShadowCallStack,
+    Thread,
+    Hwaddress,
+}
+
 /// Configuration for compiletest
 #[derive(Debug, Default, Clone)]
 pub struct Config {
@@ -560,6 +576,12 @@ pub struct TargetCfg {
     pub(crate) panic: PanicStrategy,
     #[serde(default)]
     pub(crate) dynamic_linking: bool,
+    #[serde(rename = "supported-sanitizers", default)]
+    pub(crate) sanitizers: Vec<Sanitizer>,
+    #[serde(rename = "supports-xray", default)]
+    pub(crate) xray: bool,
+    #[serde(default = "default_reloc_model")]
+    pub(crate) relocation_model: String,
 }
 
 impl TargetCfg {
@@ -570,6 +592,10 @@ impl TargetCfg {
 
 fn default_os() -> String {
     "none".into()
+}
+
+fn default_reloc_model() -> String {
+    "pic".into()
 }
 
 #[derive(Eq, PartialEq, Clone, Debug, Default, serde::Deserialize)]

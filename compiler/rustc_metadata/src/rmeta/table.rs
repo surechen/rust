@@ -145,8 +145,7 @@ fixed_size_enum! {
         ( Enum                                     )
         ( Variant                                  )
         ( Trait                                    )
-        ( TyAlias { lazy: false }                  )
-        ( TyAlias { lazy: true }                   )
+        ( TyAlias                                  )
         ( ForeignTy                                )
         ( TraitAlias                               )
         ( AssocTy                                  )
@@ -205,9 +204,9 @@ fixed_size_enum! {
 }
 
 fixed_size_enum! {
-    hir::IsAsync {
-        ( NotAsync )
-        ( Async    )
+    ty::Asyncness {
+        ( Yes )
+        ( No  )
     }
 }
 

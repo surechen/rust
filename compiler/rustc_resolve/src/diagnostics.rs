@@ -1169,6 +1169,10 @@ impl<'a, 'tcx> Resolver<'a, 'tcx> {
                     return;
                 }
 
+                if ident.name == kw::Underscore {
+                    return;
+                }
+
                 let child_accessible =
                     accessible && this.is_accessible_from(name_binding.vis, parent_scope.module);
 
@@ -2596,7 +2600,9 @@ fn show_candidates(
             );
             if let [first, .., last] = &path[..] {
                 let sp = first.ident.span.until(last.ident.span);
-                if sp.can_be_used_for_suggestions() {
+                // Our suggestion is empty, so make sure the span is not empty (or we'd ICE).
+                // Can happen for derive-generated spans.
+                if sp.can_be_used_for_suggestions() && !sp.is_empty() {
                     err.span_suggestion_verbose(
                         sp,
                         format!("if you import `{}`, refer to it directly", last.ident),

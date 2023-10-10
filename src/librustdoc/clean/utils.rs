@@ -275,7 +275,8 @@ pub(crate) fn print_const(cx: &DocContext<'_>, n: ty::Const<'_>) -> String {
 pub(crate) fn print_evaluated_const(
     tcx: TyCtxt<'_>,
     def_id: DefId,
-    underscores_and_type: bool,
+    with_underscores: bool,
+    with_type: bool,
 ) -> Option<String> {
     tcx.const_eval_poly(def_id).ok().and_then(|val| {
         let ty = tcx.type_of(def_id).instantiate_identity();
@@ -283,8 +284,8 @@ pub(crate) fn print_evaluated_const(
             (_, &ty::Ref(..)) => None,
             (mir::ConstValue::Scalar(_), &ty::Adt(_, _)) => None,
             (mir::ConstValue::Scalar(_), _) => {
-                let const_ = mir::ConstantKind::from_value(val, ty);
-                Some(print_const_with_custom_print_scalar(tcx, const_, underscores_and_type))
+                let const_ = mir::Const::from_value(val, ty);
+                Some(print_const_with_custom_print_scalar(tcx, const_, with_underscores, with_type))
             }
             _ => None,
         }
@@ -319,33 +320,38 @@ fn format_integer_with_underscore_sep(num: &str) -> String {
 
 fn print_const_with_custom_print_scalar<'tcx>(
     tcx: TyCtxt<'tcx>,
-    ct: mir::ConstantKind<'tcx>,
-    underscores_and_type: bool,
+    ct: mir::Const<'tcx>,
+    with_underscores: bool,
+    with_type: bool,
 ) -> String {
     // Use a slightly different format for integer types which always shows the actual value.
     // For all other types, fallback to the original `pretty_print_const`.
     match (ct, ct.ty().kind()) {
-        (mir::ConstantKind::Val(mir::ConstValue::Scalar(int), _), ty::Uint(ui)) => {
-            if underscores_and_type {
-                format!("{}{}", format_integer_with_underscore_sep(&int.to_string()), ui.name_str())
+        (mir::Const::Val(mir::ConstValue::Scalar(int), _), ty::Uint(ui)) => {
+            let mut output = if with_underscores {
+                format_integer_with_underscore_sep(&int.to_string())
             } else {
                 int.to_string()
+            };
+            if with_type {
+                output += ui.name_str();
             }
+            output
         }
-        (mir::ConstantKind::Val(mir::ConstValue::Scalar(int), _), ty::Int(i)) => {
+        (mir::Const::Val(mir::ConstValue::Scalar(int), _), ty::Int(i)) => {
             let ty = ct.ty();
             let size = tcx.layout_of(ty::ParamEnv::empty().and(ty)).unwrap().size;
             let data = int.assert_bits(size);
             let sign_extended_data = size.sign_extend(data) as i128;
-            if underscores_and_type {
-                format!(
-                    "{}{}",
-                    format_integer_with_underscore_sep(&sign_extended_data.to_string()),
-                    i.name_str()
-                )
+            let mut output = if with_underscores {
+                format_integer_with_underscore_sep(&sign_extended_data.to_string())
             } else {
                 sign_extended_data.to_string()
+            };
+            if with_type {
+                output += i.name_str();
             }
+            output
         }
         _ => ct.to_string(),
     }

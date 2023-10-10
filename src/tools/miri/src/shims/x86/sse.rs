@@ -7,17 +7,19 @@ use rand::Rng as _;
 
 use super::{bin_op_simd_float_all, bin_op_simd_float_first, FloatBinOp, FloatCmpOp};
 use crate::*;
-use shims::foreign_items::EmulateByNameResult;
+use shims::foreign_items::EmulateForeignItemResult;
 
 impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
+    crate::MiriInterpCxExt<'mir, 'tcx>
+{
     fn emulate_x86_sse_intrinsic(
         &mut self,
         link_name: Symbol,
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, EmulateByNameResult<'mir, 'tcx>> {
+    ) -> InterpResult<'tcx, EmulateForeignItemResult> {
         let this = self.eval_context_mut();
         // Prefix should have already been checked.
         let unprefixed_name = link_name.as_str().strip_prefix("llvm.x86.sse.").unwrap();
@@ -139,10 +141,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let left = this.read_scalar(&this.project_index(&left, 0)?)?.to_f32()?;
                 let right = this.read_scalar(&this.project_index(&right, 0)?)?.to_f32()?;
-                // The difference between the com* and *ucom variants is signaling
+                // The difference between the com* and ucom* variants is signaling
                 // of exceptions when either argument is a quiet NaN. We do not
                 // support accessing the SSE status register from miri (or from Rust,
-                // for that matter), so we treat equally both variants.
+                // for that matter), so we treat both variants equally.
                 let res = match unprefixed_name {
                     "comieq.ss" | "ucomieq.ss" => left == right,
                     "comilt.ss" | "ucomilt.ss" => left < right,
@@ -173,12 +175,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     _ => unreachable!(),
                 };
 
-                let res = this.float_to_int_checked(op, dest.layout.ty, rnd).unwrap_or_else(|| {
+                let res = this.float_to_int_checked(op, dest.layout, rnd).unwrap_or_else(|| {
                     // Fallback to minimum acording to SSE semantics.
-                    Scalar::from_int(dest.layout.size.signed_int_min(), dest.layout.size)
+                    ImmTy::from_int(dest.layout.size.signed_int_min(), dest.layout)
                 });
 
-                this.write_scalar(res, dest)?;
+                this.write_immediate(*res, dest)?;
             }
             // Used to implement the _mm_cvtsi32_ss and _mm_cvtsi64_ss functions.
             // Converts `right` from i32/i64 to f32. Returns a SIMD vector with
@@ -196,8 +198,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let right = this.read_immediate(right)?;
                 let dest0 = this.project_index(&dest, 0)?;
-                let res0 = this.int_to_int_or_float(&right, dest0.layout.ty)?;
-                this.write_immediate(res0, &dest0)?;
+                let res0 = this.int_to_int_or_float(&right, dest0.layout)?;
+                this.write_immediate(*res0, &dest0)?;
 
                 for i in 1..dest_len {
                     this.copy_op(
@@ -226,9 +228,9 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 this.write_scalar(Scalar::from_u32(res), dest)?;
             }
-            _ => return Ok(EmulateByNameResult::NotSupported),
+            _ => return Ok(EmulateForeignItemResult::NotSupported),
         }
-        Ok(EmulateByNameResult::NeedsJumping)
+        Ok(EmulateForeignItemResult::NeedsJumping)
     }
 }
 

@@ -118,7 +118,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         T: Copy + TypeFoldable<TyCtxt<'tcx>>,
     {
         debug!("monomorphize: self.instance={:?}", self.instance);
-        self.instance.subst_mir_and_normalize_erasing_regions(
+        self.instance.instantiate_mir_and_normalize_erasing_regions(
             self.cx.tcx(),
             ty::ParamEnv::reveal_all(),
             ty::EarlyBinder::bind(value),
@@ -209,18 +209,11 @@ pub fn codegen_mir<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
         caller_location: None,
     };
 
-    fx.per_local_var_debug_info = fx.compute_per_local_var_debug_info(&mut start_bx);
+    // It may seem like we should iterate over `required_consts` to ensure they all successfully
+    // evaluate; however, the `MirUsedCollector` already did that during the collection phase of
+    // monomorphization so we don't have to do it again.
 
-    // Rust post-monomorphization checks; we later rely on them.
-    if let Err(err) =
-        mir.post_mono_checks(cx.tcx(), ty::ParamEnv::reveal_all(), |c| Ok(fx.monomorphize(c)))
-    {
-        err.emit_err(cx.tcx());
-        // This IR shouldn't ever be emitted, but let's try to guard against any of this code
-        // ever running.
-        start_bx.abort();
-        return;
-    }
+    fx.per_local_var_debug_info = fx.compute_per_local_var_debug_info(&mut start_bx);
 
     let memory_locals = analyze::non_ssa_locals(&fx);
 

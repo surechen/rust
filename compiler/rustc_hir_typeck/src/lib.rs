@@ -5,7 +5,6 @@
 #![feature(box_patterns)]
 #![feature(min_specialization)]
 #![feature(control_flow_enum)]
-#![feature(option_as_slice)]
 #![recursion_limit = "256"]
 
 #[macro_use]
@@ -32,7 +31,6 @@ pub mod expr_use_visitor;
 mod fallback;
 mod fn_ctxt;
 mod gather_locals;
-mod generator_interior;
 mod inherited;
 mod intrinsicck;
 mod mem_categorization;

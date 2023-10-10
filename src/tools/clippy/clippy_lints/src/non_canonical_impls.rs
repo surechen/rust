@@ -1,10 +1,9 @@
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
-use clippy_utils::paths::ORD_CMP;
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{get_parent_node, is_res_lang_ctor, last_path_segment, match_def_path, path_res, std_or_core};
+use clippy_utils::{get_parent_node, is_res_lang_ctor, last_path_segment, path_res, std_or_core};
 use rustc_errors::Applicability;
 use rustc_hir::def_id::LocalDefId;
-use rustc_hir::{Expr, ExprKind, ImplItem, ImplItemKind, ItemKind, LangItem, Node, UnOp};
+use rustc_hir::{Expr, ExprKind, ImplItem, ImplItemKind, LangItem, Node, UnOp};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::EarlyBinder;
 use rustc_session::{declare_lint_pass, declare_tool_lint};
@@ -103,7 +102,7 @@ declare_clippy_lint! {
     ///     }
     /// }
     /// ```
-    #[clippy::version = "1.72.0"]
+    #[clippy::version = "1.73.0"]
     pub NON_CANONICAL_PARTIAL_ORD_IMPL,
     suspicious,
     "non-canonical implementation of `PartialOrd` on an `Ord` type"
@@ -122,9 +121,6 @@ impl LateLintPass<'_> for NonCanonicalImpls {
         if cx.tcx.is_automatically_derived(item.owner_id.to_def_id()) {
             return;
         }
-        let ItemKind::Impl(_) = item.kind else {
-            return;
-        };
         let ImplItemKind::Fn(_, impl_item_id) = cx.tcx.hir().impl_item(impl_item.impl_item_id()).kind else {
             return;
         };
@@ -180,17 +176,8 @@ impl LateLintPass<'_> for NonCanonicalImpls {
 
         if cx.tcx.is_diagnostic_item(sym::PartialOrd, trait_impl.def_id)
             && impl_item.ident.name == sym::partial_cmp
-            && let Some(ord_def_id) = cx
-                .tcx
-                .diagnostic_items(trait_impl.def_id.krate)
-                .name_to_id
-                .get(&sym::Ord)
-            && implements_trait(
-                    cx,
-                    trait_impl.self_ty(),
-                    *ord_def_id,
-                    &[],
-                )
+            && let Some(ord_def_id) = cx.tcx.get_diagnostic_item(sym::Ord)
+            && implements_trait(cx, trait_impl.self_ty(), ord_def_id, &[])
         {
             // If the `cmp` call likely needs to be fully qualified in the suggestion
             // (like `std::cmp::Ord::cmp`). It's unfortunate we must put this here but we can't
@@ -273,7 +260,7 @@ fn self_cmp_call<'tcx>(
     match cmp_expr.kind {
         ExprKind::Call(path, [_self, _other]) => path_res(cx, path)
             .opt_def_id()
-            .is_some_and(|def_id| match_def_path(cx, def_id, &ORD_CMP)),
+            .is_some_and(|def_id| cx.tcx.is_diagnostic_item(sym::ord_cmp_method, def_id)),
         ExprKind::MethodCall(_, _, [_other], ..) => {
             // We can set this to true here no matter what as if it's a `MethodCall` and goes to the
             // `else` branch, it must be a method named `cmp` that isn't `Ord::cmp`
@@ -285,7 +272,7 @@ fn self_cmp_call<'tcx>(
             cx.tcx
                 .typeck(def_id)
                 .type_dependent_def_id(cmp_expr.hir_id)
-                .is_some_and(|def_id| match_def_path(cx, def_id, &ORD_CMP))
+                .is_some_and(|def_id| cx.tcx.is_diagnostic_item(sym::ord_cmp_method, def_id))
         },
         _ => false,
     }

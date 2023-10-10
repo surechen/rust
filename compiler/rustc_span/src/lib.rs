@@ -33,7 +33,7 @@ extern crate rustc_macros;
 #[macro_use]
 extern crate tracing;
 
-use rustc_data_structures::{cold_path, AtomicRef};
+use rustc_data_structures::{outline, AtomicRef};
 use rustc_macros::HashStable_Generic;
 use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 
@@ -280,8 +280,7 @@ impl RealFileName {
 }
 
 /// Differentiates between real files and common virtual files.
-#[derive(Debug, Eq, PartialEq, Clone, Ord, PartialOrd, Hash)]
-#[derive(Decodable, Encodable)]
+#[derive(Debug, Eq, PartialEq, Clone, Ord, PartialOrd, Hash, Decodable, Encodable)]
 pub enum FileName {
     Real(RealFileName),
     /// Call to `quote!`.
@@ -292,8 +291,6 @@ pub enum FileName {
     // FIXME(jseyfried)
     MacroExpansion(Hash64),
     ProcMacroSourceCode(Hash64),
-    /// Strings provided as `--cfg [cfgspec]` stored in a `crate_cfg`.
-    CfgSpec(Hash64),
     /// Strings provided as crate attributes in the CLI.
     CliCrateAttr(Hash64),
     /// Custom sources for explicit parser calls from plugins and drivers.
@@ -305,7 +302,6 @@ pub enum FileName {
 
 impl From<PathBuf> for FileName {
     fn from(p: PathBuf) -> Self {
-        assert!(!p.to_string_lossy().ends_with('>'));
         FileName::Real(RealFileName::LocalPath(p))
     }
 }
@@ -339,7 +335,6 @@ impl fmt::Display for FileNameDisplay<'_> {
             MacroExpansion(_) => write!(fmt, "<macro expansion>"),
             Anon(_) => write!(fmt, "<anon>"),
             ProcMacroSourceCode(_) => write!(fmt, "<proc-macro source code>"),
-            CfgSpec(_) => write!(fmt, "<cfgspec>"),
             CliCrateAttr(_) => write!(fmt, "<crate attribute>"),
             Custom(ref s) => write!(fmt, "<{s}>"),
             DocTest(ref path, _) => write!(fmt, "{}", path.display()),
@@ -365,7 +360,6 @@ impl FileName {
             Anon(_)
             | MacroExpansion(_)
             | ProcMacroSourceCode(_)
-            | CfgSpec(_)
             | CliCrateAttr(_)
             | Custom(_)
             | QuoteExpansion(_)
@@ -1592,7 +1586,7 @@ impl SourceFile {
             return &lines[..];
         }
 
-        cold_path(|| {
+        outline(|| {
             self.convert_diffs_to_lines_frozen();
             if let Some(SourceFileLines::Lines(lines)) = self.lines.get() {
                 return &lines[..];
@@ -1753,7 +1747,7 @@ impl SourceFile {
         // is recorded.
         let diff = match self.normalized_pos.binary_search_by(|np| np.pos.cmp(&pos)) {
             Ok(i) => self.normalized_pos[i].diff,
-            Err(i) if i == 0 => 0,
+            Err(0) => 0,
             Err(i) => self.normalized_pos[i - 1].diff,
         };
 
@@ -1775,7 +1769,7 @@ impl SourceFile {
             .binary_search_by(|np| (np.pos.0 + np.diff).cmp(&(self.start_pos.0 + offset)))
         {
             Ok(i) => self.normalized_pos[i].diff,
-            Err(i) if i == 0 => 0,
+            Err(0) => 0,
             Err(i) => self.normalized_pos[i - 1].diff,
         };
 

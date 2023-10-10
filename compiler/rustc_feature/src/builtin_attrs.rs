@@ -537,7 +537,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         allow_internal_unsafe, Normal, template!(Word), WarnFollowing,
         "allow_internal_unsafe side-steps the unsafe_code lint",
     ),
-    ungated!(rustc_safe_intrinsic, Normal, template!(Word), DuplicatesOk),
     rustc_attr!(rustc_allowed_through_unstable_modules, Normal, template!(Word), WarnFollowing,
     "rustc_allowed_through_unstable_modules special cases accidental stabilizations of stable items \
     through unstable paths"),
@@ -666,6 +665,10 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     // Do not const-check this function's body. It will always get replaced during CTFE.
     rustc_attr!(
         rustc_do_not_const_check, Normal, template!(Word), WarnFollowing, INTERNAL_UNSTABLE
+    ),
+    // Ensure the argument to this function is &&str during const-check.
+    rustc_attr!(
+        rustc_const_panic_str, Normal, template!(Word), WarnFollowing, INTERNAL_UNSTABLE
     ),
 
     // ==========================================================================
@@ -805,6 +808,10 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     rustc_attr!(
         rustc_doc_primitive, Normal, template!(NameValueStr: "primitive name"), ErrorFollowing,
         r#"`rustc_doc_primitive` is a rustc internal attribute"#,
+    ),
+    rustc_attr!(
+        rustc_safe_intrinsic, Normal, template!(Word), WarnFollowing,
+        "the `#[rustc_safe_intrinsic]` attribute is used internally to mark intrinsics as safe"
     ),
 
     // ==========================================================================

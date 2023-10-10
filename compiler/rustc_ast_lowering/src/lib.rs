@@ -1664,7 +1664,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
                     lifetime.ident,
                 ));
 
-                // Now make an arg that we can use for the substs of the opaque tykind.
+                // Now make an arg that we can use for the generic params of the opaque tykind.
                 let id = self.next_node_id();
                 let lifetime_arg = self.new_named_lifetime_with_res(id, lifetime.ident, res);
                 let duplicated_lifetime_def_id = self.local_def_id(duplicated_lifetime_node_id);
@@ -1824,7 +1824,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             }
 
             let fn_def_id = self.local_def_id(fn_node_id);
-            self.lower_async_fn_ret_ty(&decl.output, fn_def_id, ret_id, kind)
+            self.lower_async_fn_ret_ty(&decl.output, fn_def_id, ret_id, kind, fn_span)
         } else {
             match &decl.output {
                 FnRetTy::Ty(ty) => {
@@ -1901,8 +1901,9 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
         fn_def_id: LocalDefId,
         opaque_ty_node_id: NodeId,
         fn_kind: FnDeclKind,
+        fn_span: Span,
     ) -> hir::FnRetTy<'hir> {
-        let span = self.lower_span(output.span());
+        let span = self.lower_span(fn_span);
         let opaque_ty_span = self.mark_span_with_reason(DesugaringKind::Async, span, None);
 
         let captured_lifetimes: Vec<_> = self

@@ -59,9 +59,18 @@ pub(crate) enum BadTypePlusSub {
 #[diag(parse_maybe_recover_from_bad_qpath_stage_2)]
 pub(crate) struct BadQPathStage2 {
     #[primary_span]
-    #[suggestion(code = "", applicability = "maybe-incorrect")]
     pub span: Span,
-    pub ty: String,
+    #[subdiagnostic]
+    pub wrap: WrapType,
+}
+
+#[derive(Subdiagnostic)]
+#[multipart_suggestion(parse_suggestion, applicability = "machine-applicable")]
+pub(crate) struct WrapType {
+    #[suggestion_part(code = "<")]
+    pub lo: Span,
+    #[suggestion_part(code = ">")]
+    pub hi: Span,
 }
 
 #[derive(Diagnostic)]
@@ -419,6 +428,17 @@ pub(crate) struct ExpectedElseBlock {
     pub else_span: Span,
     #[suggestion(applicability = "maybe-incorrect", code = "if ")]
     pub condition_start: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(parse_expected_struct_field)]
+pub(crate) struct ExpectedStructField {
+    #[primary_span]
+    #[label]
+    pub span: Span,
+    pub token: Token,
+    #[label(parse_ident_label)]
+    pub ident_span: Span,
 }
 
 #[derive(Diagnostic)]

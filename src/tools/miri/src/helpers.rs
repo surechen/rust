@@ -1,5 +1,3 @@
-pub mod convert;
-
 use std::cmp;
 use std::iter;
 use std::num::NonZeroUsize;
@@ -962,7 +960,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         self.check_abi(abi, exp_abi)?;
         if let Some((body, instance)) = self.eval_context_mut().lookup_exported_symbol(link_name)? {
             // If compiler-builtins is providing the symbol, then don't treat it as a clash.
-            // We'll use our built-in implementation in `emulate_foreign_item_by_name` for increased
+            // We'll use our built-in implementation in `emulate_foreign_item_inner` for increased
             // performance. Note that this means we won't catch any undefined behavior in
             // compiler-builtins when running other crates, but Miri can still be run on
             // compiler-builtins itself (or any crate that uses it as a normal dependency)
@@ -1013,15 +1011,15 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     fn float_to_int_checked<F>(
         &self,
         f: F,
-        dest_ty: Ty<'tcx>,
+        cast_to: TyAndLayout<'tcx>,
         round: rustc_apfloat::Round,
-    ) -> Option<Scalar<Provenance>>
+    ) -> Option<ImmTy<'tcx, Provenance>>
     where
         F: rustc_apfloat::Float + Into<Scalar<Provenance>>,
     {
         let this = self.eval_context_ref();
 
-        match dest_ty.kind() {
+        let val = match cast_to.ty.kind() {
             // Unsigned
             ty::Uint(t) => {
                 let size = Integer::from_uint_ty(this, *t).size();
@@ -1033,11 +1031,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ) {
                     // Floating point value is NaN (flagged with INVALID_OP) or outside the range
                     // of values of the integer type (flagged with OVERFLOW or UNDERFLOW).
-                    None
+                    return None;
                 } else {
                     // Floating point value can be represented by the integer type after rounding.
                     // The INEXACT flag is ignored on purpose to allow rounding.
-                    Some(Scalar::from_uint(res.value, size))
+                    Scalar::from_uint(res.value, size)
                 }
             }
             // Signed
@@ -1051,20 +1049,22 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 ) {
                     // Floating point value is NaN (flagged with INVALID_OP) or outside the range
                     // of values of the integer type (flagged with OVERFLOW or UNDERFLOW).
-                    None
+                    return None;
                 } else {
                     // Floating point value can be represented by the integer type after rounding.
                     // The INEXACT flag is ignored on purpose to allow rounding.
-                    Some(Scalar::from_int(res.value, size))
+                    Scalar::from_int(res.value, size)
                 }
             }
             // Nothing else
             _ =>
                 span_bug!(
                     this.cur_span(),
-                    "attempted float-to-int conversion with non-int output type {dest_ty:?}"
+                    "attempted float-to-int conversion with non-int output type {}",
+                    cast_to.ty,
                 ),
-        }
+        };
+        Some(ImmTy::from_scalar(val, cast_to))
     }
 
     /// Returns an integer type that is twice wide as `ty`

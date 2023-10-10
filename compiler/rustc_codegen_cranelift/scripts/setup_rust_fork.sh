@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-./y.sh build --no-unstable-features
+./y.sh build
 
 echo "[SETUP] Rust fork"
 git clone https://github.com/rust-lang/rust.git || true
@@ -31,7 +31,7 @@ index d95b5b7f17f..00b6f0e3635 100644
 EOF
 
 cat > config.toml <<EOF
-changelog-seen = 2
+change-id = 115898
 
 [llvm]
 ninja = false

@@ -158,6 +158,25 @@ impl Step for Std {
         target_deps.extend(copy_third_party_objects(builder, &compiler, target));
         target_deps.extend(copy_self_contained_objects(builder, &compiler, target));
 
+        // The LLD wrappers and `rust-lld` are self-contained linking components that can be
+        // necessary to link the stdlib on some targets. We'll also need to copy these binaries to
+        // the `stage0-sysroot` to ensure the linker is found when bootstrapping on such a target.
+        if compiler.stage == 0 && compiler.host == builder.config.build {
+            // We want to copy the host `bin` folder within the `rustlib` folder in the sysroot.
+            let src_sysroot_bin = builder
+                .rustc_snapshot_sysroot()
+                .join("lib")
+                .join("rustlib")
+                .join(compiler.host.triple)
+                .join("bin");
+            if src_sysroot_bin.exists() {
+                let target_sysroot_bin =
+                    builder.sysroot_libdir(compiler, target).parent().unwrap().join("bin");
+                t!(fs::create_dir_all(&target_sysroot_bin));
+                builder.cp_r(&src_sysroot_bin, &target_sysroot_bin);
+            }
+        }
+
         let mut cargo = builder.cargo(compiler, Mode::Std, SourceType::InTree, target, "build");
         std_cargo(builder, target, compiler.stage, &mut cargo);
         for krate in &*self.crates {
@@ -1658,15 +1677,17 @@ impl Step for Assemble {
             let src_exe = exe("lld", target_compiler.host);
             let dst_exe = exe("rust-lld", target_compiler.host);
             builder.copy(&lld_install.join("bin").join(&src_exe), &libdir_bin.join(&dst_exe));
-            // for `-Z gcc-ld=lld`
-            let gcc_ld_dir = libdir_bin.join("gcc-ld");
-            t!(fs::create_dir(&gcc_ld_dir));
+            let self_contained_lld_dir = libdir_bin.join("gcc-ld");
+            t!(fs::create_dir(&self_contained_lld_dir));
             let lld_wrapper_exe = builder.ensure(crate::tool::LldWrapper {
                 compiler: build_compiler,
                 target: target_compiler.host,
             });
             for name in crate::LLD_FILE_NAMES {
-                builder.copy(&lld_wrapper_exe, &gcc_ld_dir.join(exe(name, target_compiler.host)));
+                builder.copy(
+                    &lld_wrapper_exe,
+                    &self_contained_lld_dir.join(exe(name, target_compiler.host)),
+                );
             }
         }
 
@@ -1789,7 +1810,10 @@ pub fn run_cargo(
                 // During check builds we need to keep crate metadata
                 keep = true;
             } else if rlib_only_metadata {
-                if filename.contains("jemalloc_sys") || filename.contains("rustc_smir") {
+                if filename.contains("jemalloc_sys")
+                    || filename.contains("rustc_smir")
+                    || filename.contains("stable_mir")
+                {
                     // jemalloc_sys and rustc_smir are not linked into librustc_driver.so,
                     // so we need to distribute them as rlib to be able to use them.
                     keep |= filename.ends_with(".rlib");

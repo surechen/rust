@@ -416,6 +416,7 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
     bool RelaxELFRelocations,
     bool UseInitArray,
     const char *SplitDwarfFile,
+    const char *OutputObjFile,
     const char *DebugInfoCompression,
     bool ForceEmulatedTls,
     const char *ArgsCstrBuff, size_t ArgsCstrBuffLen) {
@@ -447,6 +448,9 @@ extern "C" LLVMTargetMachineRef LLVMRustCreateTargetMachine(
   Options.MCOptions.ABIName = ABIStr;
   if (SplitDwarfFile) {
       Options.MCOptions.SplitDwarfFile = SplitDwarfFile;
+  }
+  if (OutputObjFile) {
+      Options.ObjectFilenameForDebug = OutputObjFile;
   }
 #if LLVM_VERSION_GE(16, 0)
   if (!strcmp("zlib", DebugInfoCompression) && llvm::compression::zlib::isAvailable()) {
@@ -791,6 +795,20 @@ LLVMRustOptimize(
   CGSCCAnalysisManager CGAM;
   ModuleAnalysisManager MAM;
 
+  if (LLVMPluginsLen) {
+    auto PluginsStr = StringRef(LLVMPlugins, LLVMPluginsLen);
+    SmallVector<StringRef> Plugins;
+    PluginsStr.split(Plugins, ',', -1, false);
+    for (auto PluginPath: Plugins) {
+      auto Plugin = PassPlugin::Load(PluginPath.str());
+      if (!Plugin) {
+        LLVMRustSetLastError(("Failed to load pass plugin" + PluginPath.str()).c_str());
+        return LLVMRustResult::Failure;
+      }
+      Plugin->registerPassBuilderCallbacks(PB);
+    }
+  }
+
   FAM.registerPass([&] { return PB.buildDefaultAAPipeline(); });
 
   Triple TargetTriple(TheModule->getTargetTriple());
@@ -911,20 +929,6 @@ LLVMRustOptimize(
           MPM.addPass(HWAddressSanitizerPass(opts));
         }
       );
-    }
-  }
-
-  if (LLVMPluginsLen) {
-    auto PluginsStr = StringRef(LLVMPlugins, LLVMPluginsLen);
-    SmallVector<StringRef> Plugins;
-    PluginsStr.split(Plugins, ',', -1, false);
-    for (auto PluginPath: Plugins) {
-      auto Plugin = PassPlugin::Load(PluginPath.str());
-      if (!Plugin) {
-        LLVMRustSetLastError(("Failed to load pass plugin" + PluginPath.str()).c_str());
-        return LLVMRustResult::Failure;
-      }
-      Plugin->registerPassBuilderCallbacks(PB);
     }
   }
 

@@ -13,13 +13,13 @@
 extern crate rustc_hir;
 extern crate rustc_middle;
 extern crate rustc_smir;
+extern crate stable_mir;
 
 use rustc_hir::def::DefKind;
 use rustc_middle::ty::TyCtxt;
-use rustc_smir::{
-    rustc_internal,
-    stable_mir::{self, fold::Foldable},
-};
+use rustc_smir::rustc_internal;
+
+use stable_mir::fold::Foldable;
 use std::assert_matches::assert_matches;
 use std::io::Write;
 use std::ops::ControlFlow;
@@ -27,7 +27,7 @@ use std::ops::ControlFlow;
 const CRATE_NAME: &str = "input";
 
 /// This function uses the Stable MIR APIs to get information about the test crate.
-fn test_stable_mir(tcx: TyCtxt<'_>) -> ControlFlow<()> {
+fn test_stable_mir(_tcx: TyCtxt<'_>) -> ControlFlow<()> {
     // Get the local crate using stable_mir API.
     let local = stable_mir::local_crate();
     assert_eq!(&local.name, CRATE_NAME);
@@ -36,88 +36,88 @@ fn test_stable_mir(tcx: TyCtxt<'_>) -> ControlFlow<()> {
 
     // Find items in the local crate.
     let items = stable_mir::all_local_items();
-    assert!(get_item(tcx, &items, (DefKind::Fn, "foo::bar")).is_some());
+    assert!(get_item(&items, (DefKind::Fn, "foo::bar")).is_some());
 
-    // Find the `std` crate.
-    assert!(stable_mir::find_crate("std").is_some());
+    // Find the `std` crate and assert that there is only one of it.
+    assert!(stable_mir::find_crates("std").len() == 1);
 
-    let bar = get_item(tcx, &items, (DefKind::Fn, "bar")).unwrap();
+    let bar = get_item(&items, (DefKind::Fn, "bar")).unwrap();
     let body = bar.body();
     assert_eq!(body.locals.len(), 2);
     assert_eq!(body.blocks.len(), 1);
     let block = &body.blocks[0];
     assert_eq!(block.statements.len(), 1);
-    match &block.statements[0] {
-        stable_mir::mir::Statement::Assign(..) => {}
+    match &block.statements[0].kind {
+        stable_mir::mir::StatementKind::Assign(..) => {}
         other => panic!("{other:?}"),
     }
-    match &block.terminator {
-        stable_mir::mir::Terminator::Return => {}
+    match &block.terminator.kind {
+        stable_mir::mir::TerminatorKind::Return => {}
         other => panic!("{other:?}"),
     }
 
-    let foo_bar = get_item(tcx, &items, (DefKind::Fn, "foo_bar")).unwrap();
+    let foo_bar = get_item(&items, (DefKind::Fn, "foo_bar")).unwrap();
     let body = foo_bar.body();
     assert_eq!(body.locals.len(), 7);
     assert_eq!(body.blocks.len(), 4);
     let block = &body.blocks[0];
-    match &block.terminator {
-        stable_mir::mir::Terminator::Call { .. } => {}
+    match &block.terminator.kind {
+        stable_mir::mir::TerminatorKind::Call { .. } => {}
         other => panic!("{other:?}"),
     }
 
-    let types = get_item(tcx, &items, (DefKind::Fn, "types")).unwrap();
+    let types = get_item(&items, (DefKind::Fn, "types")).unwrap();
     let body = types.body();
     assert_eq!(body.locals.len(), 6);
     assert_matches!(
-        body.locals[0].kind(),
+        body.locals[0].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Bool)
     );
     assert_matches!(
-        body.locals[1].kind(),
+        body.locals[1].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Bool)
     );
     assert_matches!(
-        body.locals[2].kind(),
+        body.locals[2].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Char)
     );
     assert_matches!(
-        body.locals[3].kind(),
+        body.locals[3].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Int(stable_mir::ty::IntTy::I32))
     );
     assert_matches!(
-        body.locals[4].kind(),
+        body.locals[4].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Uint(stable_mir::ty::UintTy::U64))
     );
     assert_matches!(
-        body.locals[5].kind(),
+        body.locals[5].ty.kind(),
         stable_mir::ty::TyKind::RigidTy(stable_mir::ty::RigidTy::Float(
             stable_mir::ty::FloatTy::F64
         ))
     );
 
-    let drop = get_item(tcx, &items, (DefKind::Fn, "drop")).unwrap();
+    let drop = get_item(&items, (DefKind::Fn, "drop")).unwrap();
     let body = drop.body();
     assert_eq!(body.blocks.len(), 2);
     let block = &body.blocks[0];
-    match &block.terminator {
-        stable_mir::mir::Terminator::Drop { .. } => {}
+    match &block.terminator.kind {
+        stable_mir::mir::TerminatorKind::Drop { .. } => {}
         other => panic!("{other:?}"),
     }
 
-    let assert = get_item(tcx, &items, (DefKind::Fn, "assert")).unwrap();
+    let assert = get_item(&items, (DefKind::Fn, "assert")).unwrap();
     let body = assert.body();
     assert_eq!(body.blocks.len(), 2);
     let block = &body.blocks[0];
-    match &block.terminator {
-        stable_mir::mir::Terminator::Assert { .. } => {}
+    match &block.terminator.kind {
+        stable_mir::mir::TerminatorKind::Assert { .. } => {}
         other => panic!("{other:?}"),
     }
 
-    let monomorphic = get_item(tcx, &items, (DefKind::Fn, "monomorphic")).unwrap();
+    let monomorphic = get_item(&items, (DefKind::Fn, "monomorphic")).unwrap();
     for block in monomorphic.body().blocks {
-        match &block.terminator {
-            stable_mir::mir::Terminator::Call { func, .. } => match func {
+        match &block.terminator.kind {
+            stable_mir::mir::TerminatorKind::Call { func, .. } => match func {
                 stable_mir::mir::Operand::Constant(c) => match &c.literal.literal {
                     stable_mir::ty::ConstantKind::Allocated(alloc) => {
                         assert!(alloc.bytes.is_empty());
@@ -127,7 +127,7 @@ fn test_stable_mir(tcx: TyCtxt<'_>) -> ControlFlow<()> {
                                 mut args,
                             )) => {
                                 let func = def.body();
-                                match func.locals[1]
+                                match func.locals[1].ty
                                     .fold(&mut args)
                                     .continue_value()
                                     .unwrap()
@@ -149,12 +149,12 @@ fn test_stable_mir(tcx: TyCtxt<'_>) -> ControlFlow<()> {
                 },
                 other => panic!("{other:?}"),
             },
-            stable_mir::mir::Terminator::Return => {}
+            stable_mir::mir::TerminatorKind::Return => {}
             other => panic!("{other:?}"),
         }
     }
 
-    let foo_const = get_item(tcx, &items, (DefKind::Const, "FOO")).unwrap();
+    let foo_const = get_item(&items, (DefKind::Const, "FOO")).unwrap();
     // Ensure we don't panic trying to get the body of a constant.
     foo_const.body();
 
@@ -163,13 +163,11 @@ fn test_stable_mir(tcx: TyCtxt<'_>) -> ControlFlow<()> {
 
 // Use internal API to find a function in a crate.
 fn get_item<'a>(
-    tcx: TyCtxt,
     items: &'a stable_mir::CrateItems,
     item: (DefKind, &str),
 ) -> Option<&'a stable_mir::CrateItem> {
     items.iter().find(|crate_item| {
-        let def_id = rustc_internal::item_def_id(crate_item);
-        tcx.def_kind(def_id) == item.0 && tcx.def_path_str(def_id) == item.1
+        crate_item.kind().to_string() == format!("{:?}", item.0) && crate_item.name() == item.1
     })
 }
 

@@ -213,7 +213,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
                 self.funclet(fx),
             );
             if fx.mir[self.bb].is_cleanup {
-                bx.do_not_inline(invokeret);
+                bx.apply_attrs_to_cleanup_callsite(invokeret);
             }
 
             if let Some((ret_dest, target)) = destination {
@@ -228,11 +228,7 @@ impl<'a, 'tcx> TerminatorCodegenHelper<'tcx> {
         } else {
             let llret = bx.call(fn_ty, fn_attrs, Some(&fn_abi), fn_ptr, &llargs, self.funclet(fx));
             if fx.mir[self.bb].is_cleanup {
-                // Cleanup is always the cold path. Don't inline
-                // drop glue. Also, when there is a deeply-nested
-                // struct, there are "symmetry" issues that cause
-                // exponential inlining - see issue #41696.
-                bx.do_not_inline(llret);
+                bx.apply_attrs_to_cleanup_callsite(llret);
             }
 
             if let Some((ret_dest, target)) = destination {
@@ -1098,8 +1094,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     InlineAsmOperandRef::Const { string }
                 }
                 mir::InlineAsmOperand::SymFn { ref value } => {
-                    let literal = self.monomorphize(value.literal);
-                    if let ty::FnDef(def_id, args) = *literal.ty().kind() {
+                    let const_ = self.monomorphize(value.const_);
+                    if let ty::FnDef(def_id, args) = *const_.ty().kind() {
                         let instance = ty::Instance::resolve_for_fn_ptr(
                             bx.tcx(),
                             ty::ParamEnv::reveal_all(),
@@ -1627,7 +1623,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
         let fn_ty = bx.fn_decl_backend_type(&fn_abi);
 
         let llret = bx.call(fn_ty, None, Some(&fn_abi), fn_ptr, &[], funclet.as_ref());
-        bx.do_not_inline(llret);
+        bx.apply_attrs_to_cleanup_callsite(llret);
 
         bx.unreachable();
 

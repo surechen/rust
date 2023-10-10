@@ -152,7 +152,7 @@ pub struct CtxtInterners<'tcx> {
     const_: InternedSet<'tcx, ConstData<'tcx>>,
     const_allocation: InternedSet<'tcx, Allocation>,
     bound_variable_kinds: InternedSet<'tcx, List<ty::BoundVariableKind>>,
-    layout: InternedSet<'tcx, LayoutS>,
+    layout: InternedSet<'tcx, LayoutS<FieldIdx, VariantIdx>>,
     adt_def: InternedSet<'tcx, AdtDefData>,
     external_constraints: InternedSet<'tcx, ExternalConstraintsData<'tcx>>,
     predefined_opaques_in_body: InternedSet<'tcx, PredefinedOpaquesData<'tcx>>,
@@ -318,7 +318,7 @@ pub struct CommonLifetimes<'tcx> {
     pub re_vars: Vec<Region<'tcx>>,
 
     /// Pre-interned values of the form:
-    /// `ReLateBound(DebruijnIndex(i), BoundRegion { var: v, kind: BrAnon(None) })`
+    /// `ReLateBound(DebruijnIndex(i), BoundRegion { var: v, kind: BrAnon })`
     /// for small values of `i` and `v`.
     pub re_late_bounds: Vec<Vec<Region<'tcx>>>,
 }
@@ -395,7 +395,7 @@ impl<'tcx> CommonLifetimes<'tcx> {
                     .map(|v| {
                         mk(ty::ReLateBound(
                             ty::DebruijnIndex::from(i),
-                            ty::BoundRegion { var: ty::BoundVar::from(v), kind: ty::BrAnon(None) },
+                            ty::BoundRegion { var: ty::BoundVar::from(v), kind: ty::BrAnon },
                         ))
                     })
                     .collect()
@@ -554,6 +554,10 @@ pub struct GlobalCtxt<'tcx> {
     /// Common consts, pre-interned for your convenience.
     pub consts: CommonConsts<'tcx>,
 
+    /// Hooks to be able to register functions in other crates that can then still
+    /// be called from rustc_middle.
+    pub(crate) hooks: crate::hooks::Providers,
+
     untracked: Untracked,
 
     pub query_system: QuerySystem<'tcx>,
@@ -703,6 +707,7 @@ impl<'tcx> TyCtxt<'tcx> {
         dep_graph: DepGraph,
         query_kinds: &'tcx [DepKindStruct<'tcx>],
         query_system: QuerySystem<'tcx>,
+        hooks: crate::hooks::Providers,
     ) -> GlobalCtxt<'tcx> {
         let data_layout = s.target.parse_data_layout().unwrap_or_else(|err| {
             s.emit_fatal(err);
@@ -721,6 +726,7 @@ impl<'tcx> TyCtxt<'tcx> {
             hir_arena,
             interners,
             dep_graph,
+            hooks,
             prof: s.prof.clone(),
             types: common_types,
             lifetimes: common_lifetimes,
@@ -1051,16 +1057,21 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Returns the `DefId` and the `BoundRegionKind` corresponding to the given region.
-    pub fn is_suitable_region(self, region: Region<'tcx>) -> Option<FreeRegionInfo> {
-        let (suitable_region_binding_scope, bound_region) = match *region {
-            ty::ReFree(ref free_region) => {
-                (free_region.scope.expect_local(), free_region.bound_region)
+    pub fn is_suitable_region(self, mut region: Region<'tcx>) -> Option<FreeRegionInfo> {
+        let (suitable_region_binding_scope, bound_region) = loop {
+            let def_id = match region.kind() {
+                ty::ReFree(fr) => fr.bound_region.get_id()?.as_local()?,
+                ty::ReEarlyBound(ebr) => ebr.def_id.expect_local(),
+                _ => return None, // not a free region
+            };
+            let scope = self.local_parent(def_id);
+            if self.def_kind(scope) == DefKind::OpaqueTy {
+                // Lifetime params of opaque types are synthetic and thus irrelevant to
+                // diagnostics. Map them back to their origin!
+                region = self.map_rpit_lifetime_to_fn_lifetime(def_id);
+                continue;
             }
-            ty::ReEarlyBound(ref ebr) => (
-                self.local_parent(ebr.def_id.expect_local()),
-                ty::BoundRegionKind::BrNamed(ebr.def_id, ebr.name),
-            ),
-            _ => return None, // not a free region
+            break (scope, ty::BrNamed(def_id.into(), self.item_name(def_id.into())));
         };
 
         let is_impl_item = match self.hir().find_by_def_id(suitable_region_binding_scope) {
@@ -1068,7 +1079,7 @@ impl<'tcx> TyCtxt<'tcx> {
             Some(Node::ImplItem(..)) => {
                 self.is_bound_region_in_impl_item(suitable_region_binding_scope)
             }
-            _ => return None,
+            _ => false,
         };
 
         Some(FreeRegionInfo {
@@ -1108,7 +1119,7 @@ impl<'tcx> TyCtxt<'tcx> {
         if let Some(hir::FnDecl { output: hir::FnRetTy::Return(hir_output), .. }) = self.hir().fn_decl_by_hir_id(hir_id)
             && let hir::TyKind::Path(hir::QPath::Resolved(
                 None,
-                hir::Path { res: hir::def::Res::Def(DefKind::TyAlias { .. }, def_id), .. }, )) = hir_output.kind
+                hir::Path { res: hir::def::Res::Def(DefKind::TyAlias, def_id), .. }, )) = hir_output.kind
             && let Some(local_id) = def_id.as_local()
             && let Some(alias_ty) = self.hir().get_by_def_id(local_id).alias_ty() // it is type alias
             && let Some(alias_generics) = self.hir().get_by_def_id(local_id).generics()
@@ -1378,7 +1389,6 @@ impl<'tcx> TyCtxt<'tcx> {
                     Placeholder,
                     Generator,
                     GeneratorWitness,
-                    GeneratorWitnessMIR,
                     Dynamic,
                     Closure,
                     Tuple,
@@ -1516,7 +1526,7 @@ direct_interners! {
     region: pub(crate) intern_region(RegionKind<'tcx>): Region -> Region<'tcx>,
     const_: intern_const(ConstData<'tcx>): Const -> Const<'tcx>,
     const_allocation: pub mk_const_alloc(Allocation): ConstAllocation -> ConstAllocation<'tcx>,
-    layout: pub mk_layout(LayoutS): Layout -> Layout<'tcx>,
+    layout: pub mk_layout(LayoutS<FieldIdx, VariantIdx>): Layout -> Layout<'tcx>,
     adt_def: pub mk_adt_def_from_data(AdtDefData): AdtDef -> AdtDef<'tcx>,
     external_constraints: pub mk_external_constraints(ExternalConstraintsData<'tcx>):
         ExternalConstraints -> ExternalConstraints<'tcx>,

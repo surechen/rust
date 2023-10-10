@@ -3,7 +3,7 @@
 //! This is in a dedicated file so that changes to this file can be reviewed more carefully.
 //! The intention is that this file only contains datatype declarations, no code.
 
-use super::{BasicBlock, Constant, Local, UserTypeProjection};
+use super::{BasicBlock, Const, Local, UserTypeProjection};
 
 use crate::mir::coverage::{CodeRegion, CoverageKind};
 use crate::traits::Reveal;
@@ -139,6 +139,7 @@ pub enum RuntimePhase {
     /// * [`TerminatorKind::Yield`]
     /// * [`TerminatorKind::GeneratorDrop`]
     /// * [`Rvalue::Aggregate`] for any `AggregateKind` except `Array`
+    /// * [`PlaceElem::OpaqueCast`]
     ///
     /// And the following variants are allowed:
     /// * [`StatementKind::Retag`]
@@ -439,17 +440,6 @@ pub enum NonDivergingIntrinsic<'tcx> {
     CopyNonOverlapping(CopyNonOverlapping<'tcx>),
 }
 
-impl std::fmt::Display for NonDivergingIntrinsic<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Assume(op) => write!(f, "assume({op:?})"),
-            Self::CopyNonOverlapping(CopyNonOverlapping { src, dst, count }) => {
-                write!(f, "copy_nonoverlapping(dst = {dst:?}, src = {src:?}, count = {count:?})")
-            }
-        }
-    }
-}
-
 /// Describes what kind of retag is to be performed.
 #[derive(Copy, Clone, TyEncodable, TyDecodable, Debug, PartialEq, Eq, Hash, HashStable)]
 #[rustc_pass_by_value]
@@ -524,7 +514,7 @@ pub enum FakeReadCause {
 #[derive(TypeFoldable, TypeVisitable)]
 pub struct Coverage {
     pub kind: CoverageKind,
-    pub code_region: Option<CodeRegion>,
+    pub code_regions: Vec<CodeRegion>,
 }
 
 #[derive(Clone, Debug, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
@@ -913,10 +903,10 @@ pub enum InlineAsmOperand<'tcx> {
         out_place: Option<Place<'tcx>>,
     },
     Const {
-        value: Box<Constant<'tcx>>,
+        value: Box<ConstOperand<'tcx>>,
     },
     SymFn {
-        value: Box<Constant<'tcx>>,
+        value: Box<ConstOperand<'tcx>>,
     },
     SymStatic {
         def_id: DefId,
@@ -1006,7 +996,7 @@ pub type AssertMessage<'tcx> = AssertKind<Operand<'tcx>>;
 ///
 /// [UCG#319]: https://github.com/rust-lang/unsafe-code-guidelines/issues/319
 ///
-/// Rust currently requires that every place obey those two rules. This is checked by MIRI and taken
+/// Rust currently requires that every place obey those two rules. This is checked by Miri and taken
 /// advantage of by codegen (via `gep inbounds`). That is possibly subject to change.
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, HashStable, TypeFoldable, TypeVisitable)]
 pub struct Place<'tcx> {
@@ -1085,6 +1075,18 @@ pub enum ProjectionElem<V, T> {
     /// Like an explicit cast from an opaque type to a concrete type, but without
     /// requiring an intermediate variable.
     OpaqueCast(T),
+
+    /// A `Subtype(T)` projection is applied to any `StatementKind::Assign` where
+    /// type of lvalue doesn't match the type of rvalue, the primary goal is making subtyping
+    /// explicit during optimizations and codegen.
+    ///
+    /// This projection doesn't impact the runtime behavior of the program except for potentially changing
+    /// some type metadata of the interpreter or codegen backend.
+    ///
+    /// This goal is achieved with mir_transform pass `Subtyper`, which runs right after
+    /// borrowchecker, as we only care about subtyping that can affect trait selection and
+    /// `TypeId`.
+    Subtype(T),
 }
 
 /// Alias for projections as they appear in places, where the base is a place
@@ -1136,7 +1138,22 @@ pub enum Operand<'tcx> {
     Move(Place<'tcx>),
 
     /// Constants are already semantically values, and remain unchanged.
-    Constant(Box<Constant<'tcx>>),
+    Constant(Box<ConstOperand<'tcx>>),
+}
+
+#[derive(Clone, Copy, PartialEq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(TypeFoldable, TypeVisitable)]
+pub struct ConstOperand<'tcx> {
+    pub span: Span,
+
+    /// Optional user-given type: for something like
+    /// `collect::<Vec<_>>`, this would be present and would
+    /// indicate that `Vec<_>` was explicitly specified.
+    ///
+    /// Needed for NLL to impose user-given type constraints.
+    pub user_ty: Option<UserTypeAnnotationIndex>,
+
+    pub const_: Const<'tcx>,
 }
 
 ///////////////////////////////////////////////////////////////////////////
@@ -1329,7 +1346,7 @@ pub enum AggregateKind<'tcx> {
     Generator(DefId, GenericArgsRef<'tcx>, hir::Movability),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, TyEncodable, TyDecodable, Hash, HashStable)]
 pub enum NullOp<'tcx> {
     /// Returns the size of a value of that type
     SizeOf,

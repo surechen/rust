@@ -23,7 +23,7 @@ pub fn test_layout(tcx: TyCtxt<'_>) {
     for id in tcx.hir_crate_items(()).definitions() {
         for attr in tcx.get_attrs(id, sym::rustc_layout) {
             match tcx.def_kind(id) {
-                DefKind::TyAlias { .. } | DefKind::Enum | DefKind::Struct | DefKind::Union => {
+                DefKind::TyAlias | DefKind::Enum | DefKind::Struct | DefKind::Union => {
                     dump_layout_of(tcx, id, attr);
                 }
                 _ => {
@@ -57,7 +57,7 @@ pub fn ensure_wf<'tcx>(
     ocx.register_obligation(obligation);
     let errors = ocx.select_all_or_error();
     if !errors.is_empty() {
-        infcx.err_ctxt().report_fulfillment_errors(&errors);
+        infcx.err_ctxt().report_fulfillment_errors(errors);
         false
     } else {
         // looks WF!

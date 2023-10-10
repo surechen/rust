@@ -112,7 +112,15 @@ const LLVM_TOOLS: &[&str] = &[
 /// LLD file names for all flavors.
 const LLD_FILE_NAMES: &[&str] = &["ld.lld", "ld64.lld", "lld-link", "wasm-ld"];
 
-pub const VERSION: usize = 2;
+/// Keeps track of major changes made to the bootstrap configuration.
+///
+/// These values also represent the IDs of the PRs that caused major changes.
+/// You can visit `https://github.com/rust-lang/rust/pull/{any-id-from-the-list}` to
+/// check for more details regarding each change.
+///
+/// If you make any major changes (such as adding new values or changing default values), please
+/// ensure that the associated PR ID is added to the end of this list.
+pub const CONFIG_CHANGE_HISTORY: &[usize] = &[115898];
 
 /// Extra --check-cfg to add when building
 /// (Mode restriction, config name, config values (if any))
@@ -133,7 +141,9 @@ const EXTRA_CHECK_CFGS: &[(Option<Mode>, &str, Option<&[&'static str]>)] = &[
     // #[cfg(bootstrap)]
     (Some(Mode::Std), "target_vendor", Some(&["unikraft"])),
     (Some(Mode::Std), "target_env", Some(&["libnx"])),
-    (Some(Mode::Std), "target_os", Some(&["teeos"])),
+    // #[cfg(bootstrap)] hurd
+    (Some(Mode::Std), "target_os", Some(&["teeos", "hurd"])),
+    (Some(Mode::Rustc), "target_os", Some(&["hurd"])),
     // #[cfg(bootstrap)] mips32r6, mips64r6
     (
         Some(Mode::Std),
@@ -1840,5 +1850,18 @@ fn envify(s: &str) -> String {
             c => c,
         })
         .flat_map(|c| c.to_uppercase())
+        .collect()
+}
+
+pub fn find_recent_config_change_ids(current_id: usize) -> Vec<usize> {
+    let index = CONFIG_CHANGE_HISTORY
+        .iter()
+        .position(|&id| id == current_id)
+        .expect(&format!("Value `{}` was not found in `CONFIG_CHANGE_HISTORY`.", current_id));
+
+    CONFIG_CHANGE_HISTORY
+        .iter()
+        .skip(index + 1) // Skip the current_id and IDs before it
+        .cloned()
         .collect()
 }

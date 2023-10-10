@@ -10,17 +10,19 @@ use rustc_target::spec::abi::Abi;
 
 use super::{bin_op_simd_float_all, bin_op_simd_float_first, FloatBinOp, FloatCmpOp};
 use crate::*;
-use shims::foreign_items::EmulateByNameResult;
+use shims::foreign_items::EmulateForeignItemResult;
 
 impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+pub(super) trait EvalContextExt<'mir, 'tcx: 'mir>:
+    crate::MiriInterpCxExt<'mir, 'tcx>
+{
     fn emulate_x86_sse2_intrinsic(
         &mut self,
         link_name: Symbol,
         abi: Abi,
         args: &[OpTy<'tcx, Provenance>],
         dest: &PlaceTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, EmulateByNameResult<'mir, 'tcx>> {
+    ) -> InterpResult<'tcx, EmulateForeignItemResult> {
         let this = self.eval_context_mut();
         // Prefix should have already been checked.
         let unprefixed_name = link_name.as_str().strip_prefix("llvm.x86.sse2.").unwrap();
@@ -56,36 +58,64 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let dest = this.project_index(&dest, i)?;
 
                     // Widen the operands to avoid overflow
-                    let twice_wide_ty = this.get_twice_wide_int_ty(left.layout.ty);
-                    let twice_wide_layout = this.layout_of(twice_wide_ty)?;
-                    let left = this.int_to_int_or_float(&left, twice_wide_ty)?;
-                    let right = this.int_to_int_or_float(&right, twice_wide_ty)?;
+                    let twice_wide = this.layout_of(this.get_twice_wide_int_ty(left.layout.ty))?;
+                    let left = this.int_to_int_or_float(&left, twice_wide)?;
+                    let right = this.int_to_int_or_float(&right, twice_wide)?;
 
                     // Calculate left + right + 1
-                    let (added, _overflow, _ty) = this.overflowing_binary_op(
+                    let added = this.wrapping_binary_op(mir::BinOp::Add, &left, &right)?;
+                    let added = this.wrapping_binary_op(
                         mir::BinOp::Add,
-                        &ImmTy::from_immediate(left, twice_wide_layout),
-                        &ImmTy::from_immediate(right, twice_wide_layout),
-                    )?;
-                    let (added, _overflow, _ty) = this.overflowing_binary_op(
-                        mir::BinOp::Add,
-                        &ImmTy::from_scalar(added, twice_wide_layout),
-                        &ImmTy::from_uint(1u32, twice_wide_layout),
+                        &added,
+                        &ImmTy::from_uint(1u32, twice_wide),
                     )?;
 
                     // Calculate (left + right + 1) / 2
-                    let (divided, _overflow, _ty) = this.overflowing_binary_op(
+                    let divided = this.wrapping_binary_op(
                         mir::BinOp::Div,
-                        &ImmTy::from_scalar(added, twice_wide_layout),
-                        &ImmTy::from_uint(2u32, twice_wide_layout),
+                        &added,
+                        &ImmTy::from_uint(2u32, twice_wide),
                     )?;
 
                     // Narrow back to the original type
-                    let res = this.int_to_int_or_float(
-                        &ImmTy::from_scalar(divided, twice_wide_layout),
-                        dest.layout.ty,
-                    )?;
-                    this.write_immediate(res, &dest)?;
+                    let res = this.int_to_int_or_float(&divided, dest.layout)?;
+                    this.write_immediate(*res, &dest)?;
+                }
+            }
+            // Used to implement the _mm_madd_epi16 function.
+            // Multiplies packed signed 16-bit integers in `left` and `right`, producing
+            // intermediate signed 32-bit integers. Horizontally add adjacent pairs of
+            // intermediate 32-bit integers, and pack the results in `dest`.
+            "pmadd.wd" => {
+                let [left, right] =
+                    this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+
+                let (left, left_len) = this.operand_to_simd(left)?;
+                let (right, right_len) = this.operand_to_simd(right)?;
+                let (dest, dest_len) = this.place_to_simd(dest)?;
+
+                assert_eq!(left_len, right_len);
+                assert_eq!(dest_len.checked_mul(2).unwrap(), left_len);
+
+                for i in 0..dest_len {
+                    let j1 = i.checked_mul(2).unwrap();
+                    let left1 = this.read_scalar(&this.project_index(&left, j1)?)?.to_i16()?;
+                    let right1 = this.read_scalar(&this.project_index(&right, j1)?)?.to_i16()?;
+
+                    let j2 = j1.checked_add(1).unwrap();
+                    let left2 = this.read_scalar(&this.project_index(&left, j2)?)?.to_i16()?;
+                    let right2 = this.read_scalar(&this.project_index(&right, j2)?)?.to_i16()?;
+
+                    let dest = this.project_index(&dest, i)?;
+
+                    // Multiplications are i16*i16->i32, which will not overflow.
+                    let mul1 = i32::from(left1).checked_mul(right1.into()).unwrap();
+                    let mul2 = i32::from(left2).checked_mul(right2.into()).unwrap();
+                    // However, this addition can overflow in the most extreme case
+                    // (-0x8000)*(-0x8000)+(-0x8000)*(-0x8000) = 0x80000000
+                    let res = mul1.wrapping_add(mul2);
+
+                    this.write_scalar(Scalar::from_i32(res), &dest)?;
                 }
             }
             // Used to implement the _mm_mulhi_epi16 and _mm_mulhi_epu16 functions.
@@ -106,30 +136,22 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let dest = this.project_index(&dest, i)?;
 
                     // Widen the operands to avoid overflow
-                    let twice_wide_ty = this.get_twice_wide_int_ty(left.layout.ty);
-                    let twice_wide_layout = this.layout_of(twice_wide_ty)?;
-                    let left = this.int_to_int_or_float(&left, twice_wide_ty)?;
-                    let right = this.int_to_int_or_float(&right, twice_wide_ty)?;
+                    let twice_wide = this.layout_of(this.get_twice_wide_int_ty(left.layout.ty))?;
+                    let left = this.int_to_int_or_float(&left, twice_wide)?;
+                    let right = this.int_to_int_or_float(&right, twice_wide)?;
 
                     // Multiply
-                    let (multiplied, _overflow, _ty) = this.overflowing_binary_op(
-                        mir::BinOp::Mul,
-                        &ImmTy::from_immediate(left, twice_wide_layout),
-                        &ImmTy::from_immediate(right, twice_wide_layout),
-                    )?;
+                    let multiplied = this.wrapping_binary_op(mir::BinOp::Mul, &left, &right)?;
                     // Keep the high half
-                    let (high, _overflow, _ty) = this.overflowing_binary_op(
+                    let high = this.wrapping_binary_op(
                         mir::BinOp::Shr,
-                        &ImmTy::from_scalar(multiplied, twice_wide_layout),
-                        &ImmTy::from_uint(dest.layout.size.bits(), twice_wide_layout),
+                        &multiplied,
+                        &ImmTy::from_uint(dest.layout.size.bits(), twice_wide),
                     )?;
 
                     // Narrow back to the original type
-                    let res = this.int_to_int_or_float(
-                        &ImmTy::from_scalar(high, twice_wide_layout),
-                        dest.layout.ty,
-                    )?;
-                    this.write_immediate(res, &dest)?;
+                    let res = this.int_to_int_or_float(&high, dest.layout)?;
+                    this.write_immediate(*res, &dest)?;
                 }
             }
             // Used to implement the _mm_mul_epu32 function.
@@ -392,11 +414,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let dest = this.project_index(&dest, i)?;
 
                     let res =
-                        this.float_to_int_checked(op, dest.layout.ty, rnd).unwrap_or_else(|| {
+                        this.float_to_int_checked(op, dest.layout, rnd).unwrap_or_else(|| {
                             // Fallback to minimum acording to SSE2 semantics.
-                            Scalar::from_i32(i32::MIN)
+                            ImmTy::from_int(i32::MIN, this.machine.layouts.i32)
                         });
-                    this.write_scalar(res, &dest)?;
+                    this.write_immediate(*res, &dest)?;
                 }
             }
             // Used to implement the _mm_packs_epi16 function.
@@ -426,8 +448,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let right_res =
                         i8::try_from(right).unwrap_or(if right < 0 { i8::MIN } else { i8::MAX });
 
-                    this.write_scalar(Scalar::from_i8(left_res.try_into().unwrap()), &left_dest)?;
-                    this.write_scalar(Scalar::from_i8(right_res.try_into().unwrap()), &right_dest)?;
+                    this.write_scalar(Scalar::from_i8(left_res), &left_dest)?;
+                    this.write_scalar(Scalar::from_i8(right_res), &right_dest)?;
                 }
             }
             // Used to implement the _mm_packus_epi16 function.
@@ -487,11 +509,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let right_res =
                         i16::try_from(right).unwrap_or(if right < 0 { i16::MIN } else { i16::MAX });
 
-                    this.write_scalar(Scalar::from_i16(left_res.try_into().unwrap()), &left_dest)?;
-                    this.write_scalar(
-                        Scalar::from_i16(right_res.try_into().unwrap()),
-                        &right_dest,
-                    )?;
+                    this.write_scalar(Scalar::from_i16(left_res), &left_dest)?;
+                    this.write_scalar(Scalar::from_i16(right_res), &right_dest)?;
                 }
             }
             // Used to implement _mm_min_sd and _mm_max_sd functions.
@@ -618,10 +637,10 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 let left = this.read_scalar(&this.project_index(&left, 0)?)?.to_f64()?;
                 let right = this.read_scalar(&this.project_index(&right, 0)?)?.to_f64()?;
-                // The difference between the com* and *ucom variants is signaling
+                // The difference between the com* and ucom* variants is signaling
                 // of exceptions when either argument is a quiet NaN. We do not
                 // support accessing the SSE status register from miri (or from Rust,
-                // for that matter), so we treat equally both variants.
+                // for that matter), so we treat both variants equally.
                 let res = match unprefixed_name {
                     "comieq.sd" | "ucomieq.sd" => left == right,
                     "comilt.sd" | "ucomilt.sd" => left < right,
@@ -648,8 +667,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let op = this.read_immediate(&this.project_index(&op, i)?)?;
                     let dest = this.project_index(&dest, i)?;
 
-                    let res = this.float_to_float_or_int(&op, dest.layout.ty)?;
-                    this.write_immediate(res, &dest)?;
+                    let res = this.float_to_float_or_int(&op, dest.layout)?;
+                    this.write_immediate(*res, &dest)?;
                 }
                 // For f32 -> f64, ignore the remaining
                 // For f64 -> f32, fill the remaining with zeros
@@ -685,11 +704,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     let dest = this.project_index(&dest, i)?;
 
                     let res =
-                        this.float_to_int_checked(op, dest.layout.ty, rnd).unwrap_or_else(|| {
+                        this.float_to_int_checked(op, dest.layout, rnd).unwrap_or_else(|| {
                             // Fallback to minimum acording to SSE2 semantics.
-                            Scalar::from_i32(i32::MIN)
+                            ImmTy::from_int(i32::MIN, this.machine.layouts.i32)
                         });
-                    this.write_scalar(res, &dest)?;
+                    this.write_immediate(*res, &dest)?;
                 }
                 // Fill the remaining with zeros
                 for i in op_len..dest_len {
@@ -716,12 +735,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                     _ => unreachable!(),
                 };
 
-                let res = this.float_to_int_checked(op, dest.layout.ty, rnd).unwrap_or_else(|| {
+                let res = this.float_to_int_checked(op, dest.layout, rnd).unwrap_or_else(|| {
                     // Fallback to minimum acording to SSE semantics.
-                    Scalar::from_int(dest.layout.size.signed_int_min(), dest.layout.size)
+                    ImmTy::from_int(dest.layout.size.signed_int_min(), dest.layout)
                 });
 
-                this.write_scalar(res, dest)?;
+                this.write_immediate(*res, dest)?;
             }
             // Used to implement the _mm_cvtsd_ss and _mm_cvtss_sd functions.
             // Converts the first f64/f32 from `right` to f32/f64 and copies
@@ -741,8 +760,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
                 let dest0 = this.project_index(&dest, 0)?;
                 // `float_to_float_or_int` here will convert from f64 to f32 (cvtsd2ss) or
                 // from f32 to f64 (cvtss2sd).
-                let res0 = this.float_to_float_or_int(&right0, dest0.layout.ty)?;
-                this.write_immediate(res0, &dest0)?;
+                let res0 = this.float_to_float_or_int(&right0, dest0.layout)?;
+                this.write_immediate(*res0, &dest0)?;
 
                 // Copy remianing from `left`
                 for i in 1..dest_len {
@@ -772,9 +791,15 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
                 this.write_scalar(Scalar::from_u32(res.try_into().unwrap()), dest)?;
             }
-            _ => return Ok(EmulateByNameResult::NotSupported),
+            // Used to implement the `_mm_pause` function.
+            // The intrinsic is used to hint the processor that the code is in a spin-loop.
+            "pause" => {
+                let [] = this.check_shim(abi, Abi::C { unwind: false }, link_name, args)?;
+                this.yield_active_thread();
+            }
+            _ => return Ok(EmulateForeignItemResult::NotSupported),
         }
-        Ok(EmulateByNameResult::NeedsJumping)
+        Ok(EmulateForeignItemResult::NeedsJumping)
     }
 }
 
